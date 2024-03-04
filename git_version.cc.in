@@ -1,0 +1,5 @@
+#include "git_version.h"
+
+const char *git_hash = "@GIT_HASH@";
+const char *git_branch = "@GIT_BRANCH@";
+const char *git_status = "@GIT_STATUS@";
