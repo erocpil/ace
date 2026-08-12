@@ -66,7 +66,9 @@ cd "$BORINGSSL_DIR"
 BSSL_COMMIT="955ef7991e41ac6c0ea5114b4b9abb98cc5fd614"
 log "Using pinned BoringSSL API v18 commit ${BSSL_COMMIT:0:12}..."
 if ! git cat-file -e "${BSSL_COMMIT}^{commit}" 2>/dev/null; then
-    git fetch --deepen=3000 origin main
+    # Fetch the pinned object directly. A fixed --deepen window eventually
+    # breaks as upstream main grows and the historical commit moves beyond it.
+    git fetch --depth 1 origin "$BSSL_COMMIT"
 fi
 git cat-file -e "${BSSL_COMMIT}^{commit}" 2>/dev/null \
     || die "Cannot fetch pinned BoringSSL commit $BSSL_COMMIT"
