@@ -477,6 +477,7 @@ lsquic_conn_ctx_t *client_on_new_conn(void *stream_if_ctx, struct lsquic_conn *c
 	service_add_client_conn(se, lconn_ctx);
 
 	lsquic_conn_set_ctx(conn, lconn_ctx);
+	ace_conn_handshaking(&lconn_ctx->conn);
 	struct lsquic_stream_ctx *sc =
 		service_stream_ctx_malloc_pending(conn, -1, -1);
 	if (!sc) {
@@ -517,10 +518,23 @@ void client_on_conn_closed(lsquic_conn_t *conn)
 
 	struct sk_buff *skb = NULL;
 	struct task *task = (struct task*)lconn_ctx->task;
-	if (service_is_running(se) && (!task || task->n_sub_done < task->n_sub)) {
-		se->run_result = -1;
-		elog("QUIC_EVENT connection status=lost task_complete=%d",
-				task && task->n_sub_done >= task->n_sub);
+	int task_complete = task && task->n_sub_done >= task->n_sub;
+	lconn_ctx->conn.task_complete = (unsigned int)task_complete;
+
+	/* P2: record connection outcome via state machine + counter */
+	if (!lconn_ctx->conn.close_reported) {
+		lconn_ctx->conn.close_reported = 1;
+		if (!task_complete && service_is_running(se)) {
+			ace_conn_fail(&lconn_ctx->conn, ACE_CLOSE_RESET);
+			se->n_conn_failed++;
+			elog("QUIC_EVENT connection status=lost task_complete=0");
+		} else {
+			ace_conn_close(&lconn_ctx->conn,
+				       task_complete
+				       ? ACE_CLOSE_USER_REQUEST
+				       : ACE_CLOSE_PEER_GRACEFUL);
+			se->n_conn_closed++;
+		}
 	}
 	if (task) {
 		/* if this conn has been assigned a task */
@@ -697,6 +711,7 @@ void client_on_hsk_done(lsquic_conn_t *conn, enum lsquic_hsk_status status)
 			{
 				log(Yellow "LSQ_HSK_OK" RESET " handshake successful");
 				struct lsquic_conn_ctx *lconn_ctx = lsquic_conn_get_ctx(conn);
+				ace_conn_active(&lconn_ctx->conn);
 				/* TODO check if skb memleak */
 				struct sk_buff *skb = NULL;
 
@@ -734,6 +749,7 @@ void client_on_hsk_done(lsquic_conn_t *conn, enum lsquic_hsk_status status)
 			{
 				log(Green "LSQ_HSK_RESUMED_OK" RESET " handshake resume successful");
 				struct lsquic_conn_ctx *lconn_ctx = lsquic_conn_get_ctx(conn);
+				ace_conn_active(&lconn_ctx->conn);
 				/* TODO check if skb memleak */
 				struct sk_buff *skb = NULL;
 
@@ -770,8 +786,11 @@ void client_on_hsk_done(lsquic_conn_t *conn, enum lsquic_hsk_status status)
 		default:
 			{
 				struct lsquic_conn_ctx *lconn_ctx = lsquic_conn_get_ctx(conn);
-				if (lconn_ctx && lconn_ctx->ce && lconn_ctx->ce->service) {
-					lconn_ctx->ce->service->run_result = -1;
+				if (lconn_ctx) {
+					ace_conn_fail(&lconn_ctx->conn, ACE_CLOSE_TLS_FAILURE);
+					if (lconn_ctx->ce && lconn_ctx->ce->service) {
+						lconn_ctx->ce->service->n_conn_failed++;
+					}
 				}
 				elog("QUIC_EVENT handshake status=failed code=%d", status);
 				lsquic_conn_abort(conn);

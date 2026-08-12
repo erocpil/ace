@@ -384,6 +384,7 @@ lsquic_conn_ctx_t *server_on_new_conn(void *stream_if_ctx, struct lsquic_conn *c
 	lconn_ctx->ce = lsquic_conn_get_peer_ctx(conn, NULL);
 	lconn_ctx->lconn = conn;
 	service_add_client_conn(se, lconn_ctx);
+	ace_conn_handshaking(&lconn_ctx->conn);
 	clog("conn %p ctx %p", conn, lconn_ctx);
 
 	/* if stream is make here, then on_new_stream() gets no conn_ctx */
@@ -410,6 +411,13 @@ void server_on_conn_closed(lsquic_conn_t *conn)
 	struct connote *ce = lconn_ctx->ce;
 	struct service *se = ce->service;
 	service_del_client_conn(se, lconn_ctx);
+
+	/* P2: record connection outcome */
+	if (!lconn_ctx->conn.close_reported) {
+		lconn_ctx->conn.close_reported = 1;
+		ace_conn_close(&lconn_ctx->conn, ACE_CLOSE_PEER_GRACEFUL);
+		se->n_conn_closed++;
+	}
 
 	struct task *task = (struct task*)lconn_ctx->task;
 	if (task) {

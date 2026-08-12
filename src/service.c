@@ -480,6 +480,17 @@ void *service_func(void *arg)
 
 	rlog("service %p destroyed", se);
 	lsquic_engine_destroy(se->engine);
+
+	/*
+	 * P2: engine destroy may fire late conn_closed callbacks.
+	 * Aggregate connection outcomes AFTER all callbacks complete.
+	 */
+	if (se->n_conn_failed > 0)
+		se->run_result = -1;
+	log("QUIC_EVENT service_final status=%s closed=%d failed=%d",
+	    se->run_result == 0 ? "ok" : "failed",
+	    se->n_conn_closed, se->n_conn_failed);
+
 	return NULL;
 }
 

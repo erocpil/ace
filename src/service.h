@@ -21,6 +21,9 @@
 /* Amount of space required for incoming ancillary data */
 #define CTL_SZ (CMSG_SPACE(MAX(DST_MSG_SZ, sizeof(struct sockaddr_in6))) + ECN_SZ)
 
+#include "tls_context.h"
+#include "quic_connection.h"
+
 struct ev_loop;
 
 /* one service represents a type of connections driven by an identical lsquic engine,
@@ -48,6 +51,10 @@ struct service {
 	// all conn established by clients
 	volatile size_t n_client_conn;
 	struct list_head conn_head;
+
+	/* P2: connection outcome counters (aggregated after engine destroy) */
+	int n_conn_closed;
+	int n_conn_failed;
 
 	void *loop;
 	// size_t (*add_event)();
@@ -186,6 +193,8 @@ struct lsquic_conn_ctx {
 	FILE *keylog_file;
 	char *session_file;
 	int session_resume_saved;
+
+	struct ace_connection conn;  /* P2: connection state machine */
 };
 
 static inline struct lsquic_conn_ctx *lconn_ctx_malloc(void)
@@ -197,6 +206,7 @@ static inline struct lsquic_conn_ctx *lconn_ctx_malloc(void)
 	INIT_LIST_HEAD(&r->conn_node);
 	INIT_LIST_HEAD(&r->running_stream_head);
 	INIT_LIST_HEAD(&r->pending_stream_head);
+	ace_conn_init(&r->conn);
 	return r;
 }
 
