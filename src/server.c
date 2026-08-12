@@ -568,6 +568,11 @@ void server_on_write(struct lsquic_stream *stream, lsquic_stream_ctx_t *sc)
 
 void server_on_close(struct lsquic_stream *stream, lsquic_stream_ctx_t *sc)
 {
+	if (!sc) {
+		elog("stream(%ld) %p sc=NULL (lsquic delivered null stream context)",
+		     lsquic_stream_id(stream), stream);
+		return;
+	}
 	elog("stream(%ld) %p", lsquic_stream_id(stream), stream);
 	elog("sc %p rx %lu tx %lu", sc, sc->rx_bytes, sc->tx_bytes);
 	service_stream_ctx_free(sc);

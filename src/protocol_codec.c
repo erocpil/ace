@@ -172,9 +172,16 @@ size_t ace_probe_encode(unsigned char *buf, size_t bufsz,
 			uint16_t stream_id,
 			const struct ace_probe *probe)
 {
+	if (!probe)
+		return 0;
+
 	size_t total = ACE_FRAME_HDR_LEN + ACE_WIRE_PROBE_LEN + probe->data_length;
 
-	if (!buf || bufsz < total || !probe)
+	/* buf==NULL is a dry-run: return required size without writing. */
+	if (!buf)
+		return total;
+
+	if (bufsz < total)
 		return 0;
 
 	unsigned char *p = buf;

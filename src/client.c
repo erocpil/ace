@@ -371,7 +371,13 @@ static int client_process_upstream_read(struct upstream_echo *echo)
 
 static int client_process_upstream_write(struct upstream_echo *echo, struct sk_buff *skb)
 {
-	// return echo->up->tx_process_func(echo, skb);
+	if (!echo || !echo->up || !echo->up->tx_process_func) {
+		elog("echo=%p up=%p tx_process_func=%p",
+		     (void*)echo, echo ? (void*)echo->up : NULL,
+		     (echo && echo->up) ? (void*)echo->up->tx_process_func : NULL);
+		skb_free(skb);
+		return -1;
+	}
 	int (*tx_process_func)(struct upstream_echo*, struct sk_buff*) =
 		echo->up->tx_process_func;
 	int n = tx_process_func(echo, skb);
@@ -776,6 +782,11 @@ void client_on_hsk_done(lsquic_conn_t *conn, enum lsquic_hsk_status status)
 
 void client_on_close(struct lsquic_stream *stream, lsquic_stream_ctx_t *sc)
 {
+	if (!sc) {
+		elog("stream(%ld) %p sc=NULL (lsquic delivered null stream context)",
+		     lsquic_stream_id(stream), stream);
+		return;
+	}
 	elog("stream(%ld) %p sc %p rx %lu tx %lu", lsquic_stream_id(stream), stream,
 			sc, sc->rx_bytes, sc->tx_bytes);
 	service_stream_ctx_free(sc);
