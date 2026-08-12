@@ -18,29 +18,28 @@ grep -F 'ACE_MAX_STREAM_QUEUE' "$root/src/resource_limits.h" >/dev/null || {
 }
 echo "PASS: ACE_MAX_STREAM_QUEUE defined"
 
-grep -F 'ace_quota_can_add' "$root/src/service.h" >/dev/null || {
-	echo "FAIL: ace_quota_can_add not used in service.h"
+grep -F 'ace_quota_can_add' "$root/src/quic_stream.h" >/dev/null || {
+	echo "FAIL: ace_quota_can_add not used in quic_stream.h"
 	exit 1
 }
 echo "PASS: lstream_ctx_add_rxq/txq guard calls ace_quota_can_add"
 
 # --- 2. Budget-aware allocation in stream ctx ---
-grep -F 'skb_malloc_charged' "$root/src/service.c" >/dev/null || {
-	echo "FAIL: skb_malloc_charged not used in service.c"
+grep -F 'skb_malloc_charged' "$root/src/quic_stream.c" >/dev/null || {
+	echo "FAIL: skb_malloc_charged not used in quic_stream.c"
 	exit 1
 }
 echo "PASS: stream ctx uses skb_malloc_charged (budget-aware)"
 
 # --- 3. Budget release on cleanup ---
-grep -F 'ace_mem_release' "$root/src/service.c" >/dev/null || {
-	echo "FAIL: ace_mem_release not called on cleanup paths"
+grep -F 'ace_mem_release' "$root/src/quic_stream.c" >/dev/null || {
+	echo "FAIL: ace_mem_release not called on stream cleanup paths"
 	exit 1
 }
-echo "PASS: ace_mem_release called in cleanup paths"
+echo "PASS: ace_mem_release called in stream cleanup paths"
 
 # --- 4. Budget charge before stream ctx allocation ---
-grep -F 'ace_mem_charge(&lc->mem_budget, sizeof(struct lsquic_stream_ctx))' \
-	"$root/src/service.c" >/dev/null || {
+grep -F 'ace_mem_charge(&lc->mem_budget' "$root/src/quic_stream.c" >/dev/null || {
 	echo "FAIL: stream ctx does not charge connection budget"
 	exit 1
 }
@@ -67,7 +66,7 @@ grep -F 'ace_mem_budget_init(&r->mem_budget, "conn"' "$root/src/service.h" >/dev
 }
 echo "PASS: connection budget initialised with service parent"
 
-grep -F 'ace_mem_budget_init(&sc->mem_budget, "stream"' "$root/src/service.c" >/dev/null || {
+grep -F 'ace_mem_budget_init(&sc->mem_budget, "stream"' "$root/src/quic_stream.c" >/dev/null || {
 	echo "FAIL: stream budget not initialised"
 	exit 1
 }

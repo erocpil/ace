@@ -23,6 +23,7 @@
 
 #include "tls_context.h"
 #include "quic_connection.h"
+#include "quic_stream.h"
 #include "mem_budget.h"
 
 struct ev_loop;
@@ -87,94 +88,6 @@ struct service {
 #define service_is_stopped(se) ((se)->state == SE_STOPPED)
 #define service_set_running(se) ((se)->state = SE_RUNNING)
 #define service_set_stopped(se) ((se)->state = SE_STOPPED)
-
-struct lsquic_stream_ctx {
-	struct list_head stream_node;
-	lsquic_stream_t *stream;
-	void *subtask;
-	uint32_t n_rxq;
-	uint32_t n_txq;
-	struct sk_buff *rx;
-	struct sk_buff *tx;
-	struct list_head rxq;
-	struct list_head txq;
-	ssize_t (*rx_func)(lsquic_stream_t*, lsquic_stream_ctx_t*);
-	ssize_t (*tx_func)(lsquic_stream_t*, lsquic_stream_ctx_t*);
-	size_t rx_bytes;
-	size_t tx_bytes;
-	unsigned short int new_action;
-	unsigned short int end_action;
-
-	/* P3: per-stream memory budget (parent = connection budget) */
-	struct ace_mem_budget mem_budget;
-};
-
-static inline struct lsquic_stream_ctx *lstream_ctx_malloc(void)
-{
-	return calloc(1, sizeof(struct lsquic_stream_ctx));
-}
-
-static inline uint32_t lstream_ctx_add_rxq(struct lsquic_stream_ctx *sc, struct sk_buff *skb)
-{
-	if (!sc || !skb || !ace_quota_can_add(sc->n_rxq, ACE_MAX_STREAM_QUEUE)) {
-		errno = ENOBUFS;
-		return 0;
-	}
-	list_add_tail(&skb->skb_node, &sc->rxq);
-	return ++sc->n_rxq;
-}
-
-static inline uint32_t lstream_ctx_del_rxq(struct lsquic_stream_ctx *sc, struct sk_buff *skb)
-{
-	if (!sc || !skb || sc->n_rxq == 0) {
-		return 0;
-	}
-	list_del(&skb->skb_node);
-	return --sc->n_rxq;
-}
-
-static inline uint32_t lstream_ctx_add_txq(struct lsquic_stream_ctx *sc, struct sk_buff *skb)
-{
-	if (!sc || !skb || !ace_quota_can_add(sc->n_txq, ACE_MAX_STREAM_QUEUE)) {
-		errno = ENOBUFS;
-		return 0;
-	}
-	list_add_tail(&skb->skb_node, &sc->txq);
-	return ++sc->n_txq;
-}
-
-static inline uint32_t lstream_ctx_del_txq(struct lsquic_stream_ctx *sc, struct sk_buff *skb)
-{
-	if (!sc || !skb || sc->n_txq == 0) {
-		return 0;
-	}
-	list_del(&skb->skb_node);
-	return --sc->n_txq;
-}
-
-static inline struct sk_buff *lstream_ctx_del_rxq_first(struct lsquic_stream_ctx *sc)
-{
-	struct sk_buff *skb = list_first_entry_or_null(&sc->rxq, struct sk_buff, skb_node);
-	if (!skb) {
-		return NULL;
-	}
-	lstream_ctx_del_rxq(sc, skb);
-	sc->rx = NULL;
-
-	return skb;
-}
-
-static inline struct sk_buff *lstream_ctx_del_txq_first(struct lsquic_stream_ctx *sc)
-{
-	struct sk_buff *skb = list_first_entry_or_null(&sc->txq, struct sk_buff, skb_node);
-	if (!skb) {
-		return NULL;
-	}
-	lstream_ctx_del_txq(sc, skb);
-	sc->tx = NULL;
-
-	return skb;
-}
 
 struct lsquic_conn_ctx {
 	struct list_head conn_node;
@@ -309,12 +222,5 @@ struct lsquic_conn *service_connect(struct connote *ce);
 struct lsquic_conn *service_connect_nop(struct connote *ce);
 struct sk_buff *service_skb_malloc(ssize_t len);
 void service_sk_buff(struct sk_buff *stb);
-struct lsquic_stream_ctx *service_stream_ctx_malloc(struct lsquic_conn_ctx *lc,
-		ssize_t rx_len, ssize_t tx_len);
-struct lsquic_stream_ctx *service_stream_ctx_malloc_pending(struct lsquic_conn_ctx *lc,
-		ssize_t rx_len, ssize_t tx_len);
-void service_stream_ctx_free(struct lsquic_stream_ctx *sc);
-ssize_t service_on_read(struct lsquic_stream *stream, lsquic_stream_ctx_t *sc);
-ssize_t service_on_write(struct lsquic_stream *stream, lsquic_stream_ctx_t *sc);
 
 #endif
