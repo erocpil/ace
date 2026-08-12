@@ -204,11 +204,6 @@ static size_t service_del_client_conn(struct service *se, struct lsquic_conn_ctx
 	return se->n_client_conn;
 }
 
-#define stream_is_cibi(s) (!(lsquic_stream_id(s) & 0x3))
-#define stream_is_sibi(s) (!((lsquic_stream_id(s) & 0x3) ^ 0x01))
-#define stream_is_ciun(s) (!((lsquic_stream_id(s) & 0x3) ^ 0x02))
-#define stream_is_siun(s) (!((lsquic_stream_id(s) & 0x3) ^ 0x03))
-
 struct service *service_init(struct config *config);
 int service_packets_out(void *packets_out_ctx,
 		const struct lsquic_out_spec *out_spec,
@@ -217,7 +212,6 @@ void service_packets_in(struct connote *ce);
 void service_add_connote(struct service *se, struct connote *ce);
 void service_del_connote(struct connote *ce);
 void *service_func(void *arg);
-int service_init_cert_hash(struct service *se);
 struct lsquic_conn *service_connect(struct connote *ce);
 struct lsquic_conn *service_connect_nop(struct connote *ce);
 struct sk_buff *service_skb_malloc(ssize_t len);
