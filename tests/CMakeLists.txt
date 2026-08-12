@@ -26,6 +26,11 @@ target_include_directories(test_net_addr PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_compile_options(test_net_addr PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 add_test(NAME net_addr COMMAND test_net_addr)
 
+add_executable(test_quic_connection test_quic_connection.c ${PROJECT_SOURCE_DIR}/src/quic_connection.c)
+target_include_directories(test_quic_connection PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_options(test_quic_connection PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME quic_connection COMMAND test_quic_connection)
+
 add_executable(test_quic_global_concurrency
 	test_quic_global_concurrency.c ${PROJECT_SOURCE_DIR}/src/quic_global.c)
 target_include_directories(test_quic_global_concurrency PRIVATE
