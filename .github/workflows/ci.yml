@@ -25,12 +25,12 @@ jobs:
         compiler: [gcc, clang]
         build_type: [Debug, Release]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential clang cmake curl git golang-go perl zlib1g-dev
-      - uses: actions/cache@v4
+          sudo apt-get install -y build-essential clang cmake curl git golang-go liblzma-dev libmagic-dev perl zlib1g-dev
+      - uses: actions/cache@v5
         with:
           path: |
             .deps
@@ -56,12 +56,12 @@ jobs:
       matrix:
         sanitizer: [address, undefined]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake curl git golang-go perl zlib1g-dev
-      - uses: actions/cache@v4
+          sudo apt-get install -y build-essential cmake curl git golang-go liblzma-dev libmagic-dev perl zlib1g-dev
+      - uses: actions/cache@v5
         with:
           path: |
             .deps
@@ -82,12 +82,12 @@ jobs:
     name: Protocol fuzz smoke
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install build tools
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential clang cmake curl git golang-go perl zlib1g-dev
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: |
             .deps
@@ -113,12 +113,12 @@ jobs:
       matrix:
         ip_version: [4, 6]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install build and runtime tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake curl git golang-go iproute2 openssl perl zlib1g-dev
-      - uses: actions/cache@v4
+          sudo apt-get install -y build-essential cmake curl git golang-go iproute2 liblzma-dev libmagic-dev openssl perl zlib1g-dev
+      - uses: actions/cache@v5
         with:
           path: |
             .deps
