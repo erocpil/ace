@@ -1,179 +1,207 @@
 [![CI](https://github.com/erocpil/ace/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/erocpil/ace/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-## About ACE
+# ACE
 
-ACE is a QUIC-based client/server framework written in C, built on top of [lsquic](https://github.com/litespeedtech/lsquic) (LiteSpeed QUIC library) and [libev](http://software.schmorp.de/pkg/libev.html). It provides:
+ACE is an experimental QUIC client/server framework written in C. It uses
+[lsquic](https://github.com/litespeedtech/lsquic) for QUIC,
+[BoringSSL](https://boringssl.googlesource.com/boringssl) for TLS, and
+[libev](https://software.schmorp.de/pkg/libev.html) for event processing.
 
-1. **Layered design** — shields upper-layer services from QUIC protocol details and event-loop internals.
-2. **Optimized I/O** — tuned network and disk paths for high-throughput QUIC transfers.
-3. **Customizable service interface** — plug in your own upstream handlers via the service layer.
-4. **Debugging modules** — built-in `alpha` debug binary, feature libraries, and scripts.
+The current implementation provides:
 
-The framework targets near-gigabit line speed on commodity hardware.
+- automatic client-to-server QUIC connection establishment;
+- TLS handshake and session resumption;
+- bidirectional control streams and concurrent data streams;
+- multi-stream file transfer with bounded frame, queue, stream, and file sizes;
+- IPv4 and IPv6 socket, packet-info, ECN, and address handling;
+- partial-I/O, retry, backpressure, and UDP zerocopy fallback handling;
+- signal-driven shutdown with joined service threads;
+- process-wide, thread-safe lsquic initialization;
+- unit, sanitizer, fuzz, and real localhost QUIC regression tests.
+
+ACE is still a research-oriented project. See the
+[engineering roadmap](docs/engineering-roadmap.md) for current limitations and
+the prioritized work queue.
 
 ## Architecture
 
-![Architecture](images/architecture.png)
+![ACE architecture](images/architecture.png)
 
-## Requirements
+The service layer owns a QUIC engine and event loop. Connection and stream
+callbacks translate QUIC events into framed tasks, while the upstream Unix
+socket accepts local control requests such as multi-stream file transfers.
 
-| Dependency | Version | Notes |
-|---|---|---|
-| [lsquic](https://github.com/litespeedtech/lsquic) | **v3.3.1** | Linked via BoringSSL |
-| [BoringSSL](https://boringssl.googlesource.com/boringssl) | **API version 18** | TLS stack for lsquic |
-| [libev](http://software.schmorp.de/pkg/libev.html) | **v4.33** | Event loop |
-| libmagic | system | File type detection |
-| CMake ≥ 3.10, GCC/Clang, Go | system | Build toolchain; Go is needed to build BoringSSL |
+## Supported platforms
 
-Pre-built static libraries (`.a`) matching these exact versions live under `lib/{x86_64,aarch64}/`. The headers that lock these API versions are under `include/`.
+- x86_64 Linux: built and tested continuously.
+- AArch64 Linux: dependency and link paths are present, but continuous ARM64
+  validation is not yet available.
 
-## Quick Start
+## Dependencies
 
-### 1. Build dependencies
+The dependency bootstrap pins the versions expected by the vendored headers:
+
+| Dependency | Version |
+|---|---|
+| lsquic | v3.3.1, pinned commit |
+| BoringSSL | API version 18, pinned commit |
+| libev | v4.33, SHA-256 verified archive |
+
+On Ubuntu, install the build and test prerequisites with:
 
 ```bash
-# Build lsquic, BoringSSL, and libev. Products land in lib/x86_64/ (or lib/aarch64/).
+sudo apt-get update
+sudo apt-get install -y \
+  build-essential clang cmake curl git golang-go iproute2 \
+  liblzma-dev libmagic-dev openssl perl socat zlib1g-dev
+```
+
+CMake 3.16 or newer is required.
+
+## Build
+
+Build the pinned static dependencies first. Products are written to
+`lib/x86_64/` or `lib/aarch64/` according to the host architecture.
+
+```bash
 bash scripts/build-deps.sh
 ```
 
-The script detects your architecture and builds everything from source. Requires: `cmake`, `make`, `gcc`, `git`, `curl`, `perl`, `go`.
-
-**If GitHub is unreachable**, the script falls back to mirrors (gitee). You may need to manually supply submodule content for lsquic (ls-qpack, ls-hpack) under `.deps/lsquic/`.
-
-### 2. Generate TLS certificate
-
-The server requires a certificate for QUIC TLS handshakes:
+GitHub is the default source. Select the configured Gitee mirrors explicitly
+when needed:
 
 ```bash
-openssl req -x509 -newkey rsa:2048 -nodes \
-  -keyout key.pem -out cert.pem \
-  -days 365 -subj "/CN=localhost"
+MIRROR=gitee bash scripts/build-deps.sh
 ```
 
-### 3. Build ACE
+Then configure and build ACE using a preset:
 
 ```bash
-mkdir build && cd build
-cmake ..
-make -j$(nproc)
+cmake --preset debug
+cmake --build --preset debug
 ```
 
-Produces:
-- `build/src/ace` — main binary (17 MB, with debug symbols)
-- `build/src/alpha` — debug helper (192 KB)
+The main products are:
 
-### 4. Smoke test
+- `build/debug/src/ace` — QUIC client/server executable;
+- `build/debug/src/alpha` — upstream/debug helper.
+
+Available configure/build presets are `debug`, `release`, `asan`, `ubsan`,
+`lsan`, and `fuzz`.
+
+Build-time development certificates are generated inside the selected build
+directory. No test private keys are stored in the repository.
+
+## Test
+
+Run the focused unit and source-contract regression suite with:
 
 ```bash
-bash scripts/smoke-test.sh
+ctest --preset debug
 ```
 
-Verifies: server starts, binds UDP, client initializes, both exit cleanly.
+The suite currently covers buffer boundaries, task/frame validation, retry and
+partial-I/O behavior, UDP send fallback, IPv4/IPv6 address helpers, concurrent
+global QUIC initialization, lifecycle and ownership contracts, dependency
+pins, ephemeral certificates, observability, and test harness safety.
 
-### 5. Run manually
+### Real QUIC integration test
 
-**Server:**
+The smoke test starts a server and client, verifies a real TLS/QUIC handshake,
+echoes a checksummed 4096-byte probe, transfers a 98,304-byte random file over
+three streams, compares the persisted file byte-for-byte, and verifies clean
+thread shutdown.
+
 ```bash
-./build/src/ace 1
+ACE_BUILD_DIR=build/debug bash scripts/smoke-test.sh
+ACE_BUILD_DIR=build/debug ACE_IP_VERSION=6 bash scripts/smoke-test.sh
 ```
 
-Binds UDP port 12345, waits for client connections.
+The first command uses IPv4; the second uses IPv6.
 
-**Client:**
+### Sanitizers and fuzzing
+
 ```bash
-./build/src/ace 0
+cmake --preset asan
+cmake --build --preset asan
+ctest --preset asan
+
+cmake --preset ubsan
+cmake --build --preset ubsan
+ctest --preset ubsan
+
+cmake --preset fuzz
+cmake --build --preset fuzz
+build/fuzz/tests/fuzz_task_protocol -runs=10000
 ```
 
-The client initializes the QUIC engine and upstream socket but does not yet
-actively initiate a connection (see [Current Status](#current-status)).
+LeakSanitizer also has a dedicated `lsan` preset. Its runtime requires an
+environment that permits LeakSanitizer process inspection.
 
-**Telnet control interface** (client side, port 9999):
+## Run manually
+
+Start the server in one terminal:
+
 ```bash
-telnet 127.0.0.1 9999
+./build/debug/src/ace 1
 ```
 
-Commands:
-```
-sf 3 tmp/100m.dat    # send file with 3 streams
-perf 1 1             # performance benchmark
+Start the automatically connecting client in another terminal:
+
+```bash
+./build/debug/src/ace 0
 ```
 
-## Project Layout
+By default, the server listens on UDP port 12345 and the client exposes its
+local control interface at `/var/run/client`. A writable alternative can be
+selected for unprivileged use:
 
+```bash
+ACE_UPSTREAM_FILE=/tmp/ace-client.sock ./build/debug/src/ace 0
+printf 'sf 3 /path/to/input.bin\n' | \
+  socat - UNIX-CONNECT:/tmp/ace-client.sock
 ```
+
+Received files are confined to the `received/` directory.
+
+### Runtime environment variables
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `ACE_IP_VERSION` | Select `4` or `6` for the built-in endpoints | `4` |
+| `ACE_UPSTREAM_FILE` | Client control Unix socket path | `/var/run/client` |
+| `ACE_CERT_FILE` | Override TLS certificate path | generated build certificate |
+| `ACE_KEY_FILE` | Override TLS private-key path | generated build key |
+| `ACE_BUILD_DIR` | Build directory used by test scripts | `build` |
+| `MIRROR` | Dependency source selection (`github` or `gitee`) | `github` |
+
+## Project layout
+
+```text
 ace/
-├── CMakeLists.txt         # Top-level CMake
-├── src/                   # Source + per-component CMakeLists
-│   ├── ace.c              # Main entry point
-│   ├── server.c           # Server logic
-│   ├── client.c           # Client logic
-│   ├── service.c          # Service layer (QUIC callbacks)
-│   ├── connote.c          # Connection note
-│   ├── config.c           # Configuration
-│   ├── upstream.c         # Upstream gateway
-│   ├── task.c             # Task management
-│   ├── runner.c           # Event loop + signal handling (shared)
-│   └── alpha.c            # Debug/test binary
-├── include/               # Dependency headers (version-locked)
-│   ├── lsquic/            # lsquic v3.3.1 API headers
-│   ├── libev/             # libev v4.33 API headers
-│   └── file/              # libmagic headers
-├── lib/                   # Pre-built static libraries
-│   ├── x86_64/            # amd64: liblsquic.a, libssl.a, libcrypto.a, libev.a
-│   └── aarch64/           # arm64
-├── .deps/                 # Dependency source trees (build-deps.sh workspace)
+├── .github/workflows/ci.yml   # GCC/Clang, sanitizer, fuzz, IPv4/IPv6 CI
+├── CMakePresets.json          # Debug, Release, sanitizer, and fuzz presets
+├── docs/                      # Engineering roadmap
+├── include/                   # Version-matched dependency headers
+├── lib/                       # Architecture-specific static dependencies
 ├── scripts/
-│   ├── build-deps.sh      # Build lsquic + BoringSSL + libev
-│   └── smoke-test.sh      # Minimal server/client smoke test
-├── images/                # Architecture + perf screenshots
-├── cert.pem / key.pem     # TLS certificate + private key (gitignored)
-└── .gitignore
+│   ├── build-deps.sh          # Reproducible dependency bootstrap
+│   ├── smoke-test.sh          # Real QUIC transfer regression
+│   └── fault-injection-test.sh
+├── src/                       # Client, server, service, task, and I/O code
+└── tests/                     # Unit, contract, concurrency, and fuzz tests
 ```
 
-## Current Status
+## Continuous integration
 
-**Compiles and links** on x86_64 with lsquic v3.3.1 + BoringSSL API v18 + libev v4.33.
+GitHub Actions verifies:
 
-| Check | Status |
-|---|---|
-| Compile (ace + alpha) | ✓ |
-| Server start + bind UDP :12345 | ✓ |
-| Server TLS cert loading | ✓ |
-| Server graceful shutdown (SIGTERM) | ✓ |
-| Client init + upstream socket | ✓ |
-| Smoke test infrastructure | ✓ |
-| End-to-end QUIC data path | ✗ (client needs explicit `lsquic_engine_connect` call) |
-
-**Known limitation:** The client initializes the QUIC engine but does not yet
-actively dial the server. The `service_connect()` function exists in the code
-but is not wired into any trigger path. This is the next item on the roadmap.
-
-## Platforms
-
-- x86_64 (tested)
-- aarch64 (link path configured, not tested)
-
-## Changes
-
-See the [commit history](https://github.com/erocpil/ace/commits/main).
-
-Recent improvements:
-
-- **Bug fixes** — `server_timeout_cb` / `client_timeout_cb` type errors, cross-thread libev loop access, `ev_timer_init` data field wipe
-- **Error handling** — replaced all `exit()` calls with error returns (14 sites)
-- **Memory safety** — `inet_ntoa` → `inet_ntop`, config owner field separation
-- **Code cleanup** — removed dead `#if 0` blocks, fixed `ace_hash_del` logic
-- **Graceful shutdown** — signal handler with `ev_break`, extracted `runner.c`
-- **Build system** — `scripts/build-deps.sh` for reproducible dependency builds
+- GCC and Clang Debug/Release builds;
+- all registered CTest regressions;
+- AddressSanitizer and UndefinedBehaviorSanitizer;
+- a bounded 10,000-run protocol fuzz campaign;
+- real IPv4 and IPv6 QUIC handshakes and multi-stream transfers.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
-
-## TODO
-
-1. Wire client `lsquic_engine_connect` path for end-to-end QUIC communication.
-2. Bidirectional data flow support.
-3. More comprehensive upstream gateway.
-4. Any feedback is appreciated.
+ACE is available under the [MIT License](LICENSE).
