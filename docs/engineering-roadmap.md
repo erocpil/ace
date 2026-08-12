@@ -84,8 +84,9 @@ does not leak resources or terminate unrelated connections.
       execute in the current ptrace environment and remains to be verified in CI.
 - [x] Pin the lsquic commit and libev archive SHA-256, use HTTPS downloads, and
       verify both fresh and cached dependency sources.
-- [ ] Add CI for GCC and Clang, focused unit tests, end-to-end tests, ASan, and
-      UBSan.
+- [x] Add CI for GCC and Clang, focused unit tests, end-to-end tests, ASan, and
+      UBSan. The pipeline also includes a bounded fuzz campaign and separate
+      IPv4/IPv6 real QUIC integration jobs.
 - [ ] Validate x86_64 continuously and add an ARM64 compile/test job when an
       ARM64 environment is available.
 
@@ -120,21 +121,27 @@ available, record that explicitly; do not report the item as fully verified.
 
 ## Next work queue
 
-The remaining work should continue in this order:
+The detailed rationale is recorded in the
+[2026-08-12 project assessment](project-assessment-2026-08-12.md). The remaining
+work should continue in this order:
 
-1. Stabilize the live peer-loss fault-injection test and verify that a crashed
+1. Enable authenticated TLS by default, with CA and hostname verification plus
+   negative certificate integration tests.
+2. Correct connection-close/final-result ordering, then stabilize the live
+   peer-loss fault-injection test and verify that a crashed
    peer produces a bounded timeout, a stable loss event, and a non-zero client
    result without requiring manual termination.
-2. Add explicit peer-abort and queue-saturation integration tests, including
+3. Add explicit peer-abort and queue-saturation integration tests, including
    isolation between unrelated connections.
-3. Run the full executable suite with LSan in an environment that permits leak
+4. Run the full executable suite with LSan in an environment that permits leak
    sanitizer process inspection; fix and document every confirmed leak.
-4. Keep the new GitHub Actions pipeline green for GCC/Clang Debug and Release,
-   ASan/UBSan, the bounded protocol fuzz campaign, and real IPv4/IPv6 QUIC
-   integration tests.
-5. Add ARM64 dependency build, compile, unit-test, and QUIC integration jobs
+5. Replace native-ABI protocol structures with a versioned, fixed-width,
+   fixed-byte-order codec and add golden vectors.
+6. Correct Release build semantics and move global CMake flags, includes, and
+   link directories to target-scoped settings.
+7. Add ARM64 dependency build, compile, unit-test, and QUIC integration jobs
    when a maintained ARM64 GitHub runner is selected and available.
-6. Only after the QUIC and build gates above are stable, continue with the
+8. Only after the QUIC and build gates above are stable, continue with the
    control/configuration interface, packaging, performance tooling, and other
    non-QUIC product work.
 
@@ -164,9 +171,8 @@ The remaining work should continue in this order:
   stable loss callback after the peer is killed. Do not treat this as verified.
 - GitHub Actions now defines GCC/Clang Debug and Release builds, all CTest
   regressions, ASan/UBSan jobs, a 10,000-run Clang fuzz smoke job, and separate
-  IPv4/IPv6 real QUIC integration jobs. Its first remote run must still be
-  observed and any runner-specific failures corrected before CI is considered
-  proven stable.
+  IPv4/IPv6 real QUIC integration jobs. Consecutive remote runs now pass all
+  nine jobs on `main`.
 - There is still no ARM64 validation environment and no explicit
   queue-saturation integration test.
 - The repository has only a `main` branch. There are no separate `x86_64` and
