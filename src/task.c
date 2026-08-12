@@ -296,27 +296,18 @@ int sendfile_init(struct task *task)
 	int fd = 0;
 
 	if (TASK_ROLE_RECV == task->role) {
-		struct sendfile_nego *nego = sft->nego;
-		char *p = &nego->head[0];
+		struct ace_sendfile_nego *nego = sft->nego;
 		char receive_file[PATH_MAX];
-		sft->path = (char*)malloc(nego->path_len);
-		if (!sft->path) {
+		sft->path = strdup(nego->path);
+		if (!sft->path)
 			return -1;
-		}
-		memcpy(sft->path, p, nego->path_len);
-		p += nego->path_len;
-		sft->file = (char*)malloc(nego->file_len);
-		if (!sft->file) {
+		sft->file = strdup(nego->file);
+		if (!sft->file)
 			return -1;
-		}
-		memcpy(sft->file, p, nego->file_len);
-		p += nego->file_len;
-		sft->type = (char*)malloc(nego->type_len);
-		if (!sft->type) {
+		sft->type = strdup(nego->type);
+		if (!sft->type)
 			return -1;
-		}
-		memcpy(sft->type, p, nego->type_len);
-		sft->length = nego->length;
+		sft->length = nego->file_length;
 		if (task_receive_path(receive_file, sizeof(receive_file),
 				TASK_RECEIVE_ROOT, sft->file) != 0) {
 			errno = EINVAL;
@@ -498,68 +489,83 @@ int sendfile_nego(struct task *task, struct sk_buff* skb)
 	if (TASK_ROLE_RECV == task->role) {
 		struct upstream_skb_head head;
 		if (task_frame_validate(skb->head, skb->len, &head) != 1 ||
-				task_payload_validate(&head, skb->head + sizeof(head)) != 0) {
+		    task_payload_validate(&head,
+			skb->head + ACE_FRAME_HDR_LEN) != 0) {
 			errno = EPROTO;
 			return -1;
 		}
-		struct sendfile_nego *nego =
-			(struct sendfile_nego*)((char*)skb->head +
-					sizeof(struct upstream_skb_head));
+
+		/* Decode from wire into an owned struct. */
+		struct ace_sendfile_nego *nego = calloc(1, sizeof(*nego));
+		if (!nego)
+			return -1;
+
+		if (ace_sendfile_nego_decode(
+			(const unsigned char *)skb->head + ACE_FRAME_HDR_LEN,
+			head.length, nego) != 0) {
+			free(nego);
+			errno = EPROTO;
+			return -1;
+		}
+
+		/* Dup strings into owned memory (wire buffer is temporary). */
+		nego->path = strdup(nego->path);
+		nego->file = strdup(nego->file);
+		nego->type = strdup(nego->type);
+
 		sendfile_nego_dump(nego);
 		sft->nego = nego;
 		return 0;
 	}
-	size_t total_length =
-		sizeof(struct sendfile_nego) +
-		strlen(sft->path) + 1 +
-		strlen(sft->file) + 1 +
-		strlen(sft->type) + 1;
-	struct sendfile_nego *nego =
-		(struct sendfile_nego*)malloc(total_length);
-	if (!nego) {
-		return -1;
-	}
-	memset(nego, 0, sizeof(*nego));
-	// nego->code = 0;
-	nego->path_len = strlen(sft->path) + 1;
-	nego->file_len = strlen(sft->file) + 1;
-	nego->type_len = strlen(sft->type) + 1;
-	nego->length = sft->length;
-	char *p = (char*)&nego->head[0];
-	memcpy(p, sft->path, nego->path_len);
-	p += nego->path_len;
-	memcpy(p, sft->file, nego->file_len);
-	p += nego->file_len;
-	memcpy(p, sft->type, nego->type_len);
 
-	sendfile_nego_dump(nego);
-
-	/* write head */
-	struct upstream_skb_head *oh = (struct upstream_skb_head*)task->data;
-	struct upstream_skb_head nh = {
-		.length = total_length,
-		.theme = oh->theme,
-		.serial = oh->serial,
+	/* Sender: build decoded nego, then encode to wire. */
+	struct ace_sendfile_nego nego = {
+		.code        = 0,
+		.path        = sft->path,
+		.path_len    = (uint16_t)(strlen(sft->path) + 1),
+		.file        = sft->file,
+		.file_len    = (uint16_t)(strlen(sft->file) + 1),
+		.type        = sft->type,
+		.type_len    = (uint16_t)(strlen(sft->type) + 1),
+		.file_length = (uint32_t)sft->length,
 	};
-	void *data = skb_reserve(skb, sizeof(nh));
-	if (data) {
-		memcpy(skb->head, &nh, sizeof(nh));
-	} else {
-		rlog("TODO free()");
+
+	/* Allocate owned copy for internal use. */
+	struct ace_sendfile_nego *nego_copy = malloc(sizeof(*nego_copy));
+	if (!nego_copy)
+		return -1;
+	*nego_copy = nego;
+	nego_copy->path = strdup(nego.path);
+	nego_copy->file = strdup(nego.file);
+	nego_copy->type = strdup(nego.type);
+
+	sendfile_nego_dump(nego_copy);
+
+	/* Encode to wire. */
+	struct upstream_skb_head *oh = (struct upstream_skb_head*)task->data;
+	size_t total = ace_sendfile_nego_encode(NULL, 0, oh->serial, nego_copy);
+	if (total == 0) {
+		free(nego_copy);
 		return -1;
 	}
-	/* write data */
-	/* set length so server knows how much to receive */
-	// ((struct upstream_skb_head*)sc->tx->head)->length = info_len;
-	void *tail = skb_put(skb, total_length);
-	if (tail) {
-		memcpy(data, (void*)nego, total_length);
-	} else {
-		rlog("TODO free()");
-	}
-	upstream_skb_head_dump((struct upstream_skb_head*)skb->head);
 
-	sft->nego = nego;
+	void *data = skb_reserve(skb, total);
+	if (!data) {
+		free(nego_copy);
+		return -1;
+	}
+
+	total = ace_sendfile_nego_encode((unsigned char *)skb->head, total,
+					 oh->serial, nego_copy);
+	if (total == 0) {
+		free(nego_copy);
+		return -1;
+	}
+
+	skb_put(skb, total);
+
+	upstream_skb_head_dump((struct upstream_skb_head*)skb->head);
+	sft->nego = nego_copy;
 
 	return 0;
 }
@@ -779,51 +785,59 @@ int perf_nego(struct task *task, struct sk_buff* skb)
 	if (TASK_ROLE_RECV == task->role) {
 		struct upstream_skb_head head;
 		if (task_frame_validate(skb->head, skb->len, &head) != 1 ||
-				task_payload_validate(&head, skb->head + sizeof(head)) != 0) {
+		    task_payload_validate(&head,
+			skb->head + ACE_FRAME_HDR_LEN) != 0) {
 			errno = EPROTO;
 			return -1;
 		}
-		struct perf_nego *nego =
-			(struct perf_nego*)((char*)skb->head +
-					sizeof(struct upstream_skb_head));
+
+		struct ace_perf_nego *nego = calloc(1, sizeof(*nego));
+		if (!nego)
+			return -1;
+
+		if (ace_perf_nego_decode(
+			(const unsigned char *)skb->head + ACE_FRAME_HDR_LEN,
+			head.length, nego) != 0) {
+			free(nego);
+			errno = EPROTO;
+			return -1;
+		}
+
 		perf_nego_dump(nego);
 		pft->nego = nego;
 		return 0;
 	}
 
-	size_t total_length =
-		sizeof(struct perf_nego) +
-		sizeof(struct upstream_skb_head);
-	struct perf_nego *nego =
-		(struct perf_nego*)malloc(total_length);
-	if (!nego) {
+	/* Sender */
+	struct ace_perf_nego *nego = calloc(1, sizeof(*nego));
+	if (!nego)
 		return -1;
-	}
-	memset(nego, 0, sizeof(*nego));
-	/* TEST */
 	nego->code = 1;
 	nego->dual = 1;
 
-	/* write head */
+	/* Encode to wire */
 	struct upstream_skb_head *oh = (struct upstream_skb_head*)task->data;
-	struct upstream_skb_head nh = {
-		.length = total_length,
-		.theme = oh->theme,
-		.serial = oh->serial,
-	};
-	void *data = skb_reserve(skb, sizeof(nh));
-	if (data) {
-		memcpy(skb->head, &nh, sizeof(nh));
-	} else {
-		rlog("TODO free()");
+	size_t total = ace_perf_nego_encode(NULL, 0, oh->serial, nego);
+	if (total == 0) {
+		free(nego);
 		return -1;
 	}
-	void *tail = skb_put(skb, total_length);
-	if (tail) {
-		memcpy(data, (void*)nego, total_length);
-	} else {
-		rlog("TODO free()");
+
+	void *data = skb_reserve(skb, total);
+	if (!data) {
+		free(nego);
+		return -1;
 	}
+
+	total = ace_perf_nego_encode((unsigned char *)skb->head, total,
+				     oh->serial, nego);
+	if (total == 0) {
+		free(nego);
+		return -1;
+	}
+
+	skb_put(skb, total);
+	pft->nego = nego;
 
 	return 0;
 }

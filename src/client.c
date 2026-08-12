@@ -100,22 +100,27 @@ static const uint64_t client_probe_nonce = UINT64_C(0x1020304050607080);
 static ssize_t client_probe_rx(struct lsquic_stream_ctx *sc)
 {
 	struct upstream_skb_head head;
-	struct task_probe probe;
+	struct ace_probe probe;
 
 	if (task_frame_validate(sc->rx->head, sc->rx->len, &head) == 0) {
 		return TASK_GOON;
 	}
 	if (task_frame_validate(sc->rx->head, sc->rx->len, &head) != 1 ||
-			task_payload_validate(&head, sc->rx->head + sizeof(head)) != 0 ||
-			head.theme != TASK_THEME_PROBE) {
+	    task_payload_validate(&head,
+		sc->rx->head + ACE_FRAME_HDR_LEN) != 0 ||
+	    head.theme != TASK_THEME_PROBE) {
 		return TASK_FAIL;
 	}
-	memcpy(&probe, sc->rx->head + sizeof(head), sizeof(probe));
+	if (ace_probe_decode(
+		(const unsigned char *)sc->rx->head + ACE_FRAME_HDR_LEN,
+		head.length, &probe) != 0) {
+		return TASK_FAIL;
+	}
 	if (probe.nonce != client_probe_nonce) {
 		return TASK_FAIL;
 	}
 	log("QUIC_PROBE_OK nonce=%lu bytes=%u checksum=%08x",
-			probe.nonce, probe.data_length, probe.checksum);
+	    probe.nonce, probe.data_length, probe.checksum);
 	/* The probe establishes that the control stream works; keep it available
 	 * for the real task negotiation that follows. */
 	sc->rx->len = 0;
@@ -571,8 +576,25 @@ lsquic_stream_ctx_t *client_on_new_stream(void *stream_if_ctx, struct lsquic_str
 	struct lsquic_stream_ctx *sc = NULL;
 
 	if (!id) {
-		size_t probe_frame_length = sizeof(struct upstream_skb_head) +
-			sizeof(struct task_probe) + TASK_PROBE_DATA_SIZE;
+		unsigned char probe_data[TASK_PROBE_DATA_SIZE];
+		for (size_t i = 0; i < TASK_PROBE_DATA_SIZE; ++i) {
+			probe_data[i] = (unsigned char)(i * 31U + 7U);
+		}
+
+		struct ace_probe probe = {
+			.magic       = TASK_PROBE_MAGIC,
+			.nonce       = client_probe_nonce,
+			.data_length = TASK_PROBE_DATA_SIZE,
+			.checksum    = task_checksum32(probe_data, TASK_PROBE_DATA_SIZE),
+			.data        = probe_data,
+		};
+
+		size_t probe_frame_length = ace_probe_encode(NULL, 0, 1, &probe);
+		if (probe_frame_length == 0) {
+			lsquic_conn_abort(lconn);
+			return NULL;
+		}
+
 		sc = lconn_ctx->pending;
 		if (!sc || !sc->tx || sc->tx->end < probe_frame_length) {
 			lsquic_conn_abort(lconn);
@@ -583,23 +605,8 @@ lsquic_stream_ctx_t *client_on_new_stream(void *stream_if_ctx, struct lsquic_str
 		rlog("s0 %p sc %p %p", stream, lsquic_stream_get_ctx(stream), sc);
 		lconn_ctx->s0 = stream;
 		lconn_ctx->pending = NULL;
-		struct upstream_skb_head probe_head = {
-			.length = sizeof(struct task_probe) + TASK_PROBE_DATA_SIZE,
-			.theme = TASK_THEME_PROBE,
-			.serial = 1,
-		};
-		struct task_probe probe = {
-			.magic = TASK_PROBE_MAGIC,
-			.nonce = client_probe_nonce,
-			.data_length = TASK_PROBE_DATA_SIZE,
-		};
-		unsigned char *probe_data = sc->tx->head + sizeof(probe_head) + sizeof(probe);
-		for (size_t i = 0; i < TASK_PROBE_DATA_SIZE; ++i) {
-			probe_data[i] = (unsigned char)(i * 31U + 7U);
-		}
-		probe.checksum = task_checksum32(probe_data, TASK_PROBE_DATA_SIZE);
-		memcpy(sc->tx->head, &probe_head, sizeof(probe_head));
-		memcpy(sc->tx->head + sizeof(probe_head), &probe, sizeof(probe));
+
+		ace_probe_encode(sc->tx->head, sc->tx->end, 1, &probe);
 		sc->tx->data = sc->tx->head;
 		sc->tx->len = probe_frame_length;
 		sc->tx->tail = sc->tx->len;

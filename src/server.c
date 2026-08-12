@@ -15,7 +15,6 @@ ssize_t s0_rx_func(struct lsquic_stream_ctx *sc)
 	}
 	struct sk_buff *skb = sc->rx;
 	struct upstream_skb_head validated;
-	struct upstream_skb_head *head = (struct upstream_skb_head*)skb->head;
 
 	/* wait for head */
 	int frame_status = task_frame_validate(skb->head, skb->len, &validated);
@@ -23,40 +22,46 @@ ssize_t s0_rx_func(struct lsquic_stream_ctx *sc)
 		return 0;
 	}
 	if (frame_status < 0 ||
-			task_payload_validate(&validated, skb->head + sizeof(validated)) != 0) {
+	    task_payload_validate(&validated,
+		skb->head + ACE_FRAME_HDR_LEN) != 0) {
 		elog("invalid task frame, aborting stream");
 		return -1;
 	}
-	upstream_skb_head_dump(head);
+	upstream_skb_head_dump(&validated);
 	SKB_DUMP(skb);
 
-	switch (head->theme) {
-		case TASK_THEME_PROBE:
-			{
-				struct sk_buff *tx = sc->tx;
-				size_t frame_length = sizeof(*head) + head->length;
-				if (!tx || tx->end < frame_length) {
-					return -1;
-				}
-				memcpy(tx->head, skb->head, frame_length);
-				tx->data = tx->head;
-				tx->len = frame_length;
-				tx->tail = frame_length;
-				tx->offset = 0;
-				log("QUIC_PROBE_ECHO nonce=%lu",
-						((struct task_probe *)(head + 1))->nonce);
-				skb->len = 0;
-				skb->tail = 0;
-				skb->offset = 0;
-				skb->data = skb->head;
-				lsquic_stream_wantwrite(sc->stream, 1);
-			}
-			break;
-		case TASK_THEME_SENDFILE:
-		case TASK_THEME_PERF:
-			/* sendfile */
-			ylog("length %u sendfile %u stream %u info %s",
-					head->length, head->theme, head->serial, (char*)(head + 1));
+	switch (validated.theme) {
+	case TASK_THEME_PROBE: {
+		struct sk_buff *tx = sc->tx;
+		size_t frame_length = ACE_FRAME_HDR_LEN + validated.length;
+		if (!tx || tx->end < frame_length)
+			return -1;
+
+		/* Echo the probe frame back verbatim. */
+		memcpy(tx->head, skb->head, frame_length);
+		tx->data = tx->head;
+		tx->len = frame_length;
+		tx->tail = frame_length;
+		tx->offset = 0;
+
+		struct ace_probe probe;
+		if (ace_probe_decode(
+			(const unsigned char *)skb->head + ACE_FRAME_HDR_LEN,
+			validated.length, &probe) == 0) {
+			log("QUIC_PROBE_ECHO nonce=%lu", probe.nonce);
+		}
+		skb->len = 0;
+		skb->tail = 0;
+		skb->offset = 0;
+		skb->data = skb->head;
+		lsquic_stream_wantwrite(sc->stream, 1);
+		break;
+	}
+	case TASK_THEME_SENDFILE:
+	case TASK_THEME_PERF:
+		ylog("length %u theme %u stream %u info %s",
+		     validated.length, validated.theme, validated.serial,
+		     (char *)(skb->head + ACE_FRAME_HDR_LEN));
 
 			struct task *task = task_create(skb, TASK_ROLE_RECV);
 			SKB_DUMP(skb);
@@ -133,7 +138,7 @@ ssize_t s0_rx_func(struct lsquic_stream_ctx *sc)
 			start_func(sc);
 			break;
 		default:
-			rlog("nop head %u %u %u", head->length, head->theme, head->serial);
+			rlog("nop head %u %u %u", validated.length, validated.theme, validated.serial);
 			/* start over */
 			skb->len = 0;
 			skb->tail = 0;

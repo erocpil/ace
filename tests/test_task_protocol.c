@@ -4,80 +4,88 @@
 
 #include "task_protocol.h"
 
-struct sendfile_frame {
-	struct upstream_skb_head frame;
-	struct sendfile_nego nego;
-	char strings[32];
-};
+/* ---- Wire buffer for encoded frames ---- */
+static unsigned char wire[4096];
 
-static size_t valid_sendfile_frame(struct sendfile_frame *value)
+static size_t make_sendfile_frame(void)
 {
-	const char path[] = "tmp";
-	const char file[] = "data.bin";
-	const char type[] = "binary";
-	unsigned char *p = (unsigned char *)value->strings;
-
-	memset(value, 0, sizeof(*value));
-	value->frame.theme = TASK_THEME_SENDFILE;
-	value->frame.serial = 3;
-	value->nego.path_len = sizeof(path);
-	value->nego.file_len = sizeof(file);
-	value->nego.type_len = sizeof(type);
-	value->nego.length = 4096;
-	memcpy(p, path, sizeof(path));
-	p += sizeof(path);
-	memcpy(p, file, sizeof(file));
-	p += sizeof(file);
-	memcpy(p, type, sizeof(type));
-	value->frame.length = sizeof(value->nego) + sizeof(path) + sizeof(file) + sizeof(type);
-	return sizeof(value->frame) + value->frame.length;
+	struct ace_sendfile_nego nego = {
+		.code        = 0,
+		.path        = "tmp",
+		.path_len    = 4,   /* "tmp\0" */
+		.file        = "data.bin",
+		.file_len    = 9,   /* "data.bin\0" */
+		.type        = "binary",
+		.type_len    = 7,   /* "binary\0" */
+		.file_length = 4096,
+	};
+	return ace_sendfile_nego_encode(wire, sizeof(wire), 3, &nego);
 }
 
 static void test_frame_validation(void)
 {
-	struct sendfile_frame value;
 	struct upstream_skb_head head;
-	size_t length = valid_sendfile_frame(&value);
+	size_t length = make_sendfile_frame();
 
-	assert(task_frame_validate(&value, sizeof(value.frame) - 1, &head) == 0);
-	assert(task_frame_validate(&value, length - 1, &head) == 0);
-	assert(task_frame_validate(&value, length, &head) == 1);
-	assert(head.length == value.frame.length);
-	value.frame.theme = TASK_THEME_MAX;
-	assert(task_frame_validate(&value, length, NULL) == -1);
-	value.frame.theme = TASK_THEME_SENDFILE;
-	value.frame.serial = 0;
-	assert(task_frame_validate(&value, length, NULL) == -1);
-	value.frame.serial = TASK_MAX_DATA_STREAMS + 1;
-	assert(task_frame_validate(&value, length, NULL) == -1);
-	value.frame.serial = 1;
-	value.frame.length = TASK_MAX_FRAME_SIZE;
-	assert(task_frame_validate(&value, length, NULL) == -1);
-	valid_sendfile_frame(&value);
-	for (size_t i = 0; i < length; ++i) {
-		assert(task_frame_validate(&value, i, NULL) == 0);
-	}
+	/* Too short for header */
+	assert(task_frame_validate(wire, ACE_FRAME_HDR_LEN - 1, &head) == 0);
+
+	/* Too short for full frame */
+	assert(task_frame_validate(wire, length - 1, &head) == 0);
+
+	/* Valid frame */
+	assert(task_frame_validate(wire, length, &head) == 1);
+	assert(head.serial == 3);
+
+	/* Bad magic */
+	wire[0] = 0xFF;
+	assert(task_frame_validate(wire, length, NULL) == -1);
+	make_sendfile_frame();
+
+	/* Out-of-range theme */
+	wire[8] = 0xFF;
+	wire[9] = 0xFF;
+	assert(task_frame_validate(wire, length, NULL) == -1);
+	make_sendfile_frame();
+
+	/* stream_id == 0 invalid */
+	ace_wr16(wire + 10, 0);
+	assert(task_frame_validate(wire, length, NULL) == -1);
 }
 
 static void test_sendfile_validation(void)
 {
-	struct sendfile_frame value;
 	struct upstream_skb_head head;
-	size_t length = valid_sendfile_frame(&value);
-	unsigned char *payload = (unsigned char *)&value.nego;
+	size_t length = make_sendfile_frame();
 
-	assert(task_frame_validate(&value, length, &head) == 1);
-	assert(task_payload_validate(&head, payload) == 0);
-	value.nego.length = 0;
-	assert(task_payload_validate(&head, payload) == -1);
-	value.nego.length = TASK_MAX_FILE_SIZE + 1ULL;
-	assert(task_payload_validate(&head, payload) == -1);
-	value.nego.length = 4096;
-	value.nego.path_len++;
-	assert(task_payload_validate(&head, payload) == -1);
-	value.nego.path_len--;
-	value.strings[value.nego.path_len - 1] = 'x';
-	assert(task_payload_validate(&head, payload) == -1);
+	assert(task_frame_validate(wire, length, &head) == 1);
+	assert(task_payload_validate(&head, wire + ACE_FRAME_HDR_LEN) == 0);
+
+	/* Corrupt length field to 0 */
+	wire[ACE_FRAME_HDR_LEN + 8] = 0;
+	wire[ACE_FRAME_HDR_LEN + 9] = 0;
+	wire[ACE_FRAME_HDR_LEN + 10] = 0;
+	wire[ACE_FRAME_HDR_LEN + 11] = 0;
+	length = make_sendfile_frame();  /* get updated head.length */
+	assert(task_frame_validate(wire, length, &head) == 1);
+	assert(task_payload_validate(&head, wire + ACE_FRAME_HDR_LEN) == 0);
+	/* Actually corrupt: */
+	ace_wr32(wire + ACE_FRAME_HDR_LEN + 8, 0);
+	head.length = ace_rd32(wire + 12);  /* payload_len from frame */
+	wire[12] = 0; wire[13] = 0; wire[14] = 0; wire[15] = 0;
+	/* invalid: file_length=0 */
+	length = make_sendfile_frame();
+	assert(task_frame_validate(wire, length, &head) == 1);
+	/* corrupt file_length to 0 */
+	ace_wr32(wire + ACE_FRAME_HDR_LEN + 8, 0);
+	assert(task_frame_validate(wire, length, &head) == 1);
+	assert(task_payload_validate(&head, wire + ACE_FRAME_HDR_LEN) == -1);
+
+	/* corrupt file_length to exceed max */
+	length = make_sendfile_frame();
+	assert(task_frame_validate(wire, length, &head) == 1);
+	ace_wr32(wire + ACE_FRAME_HDR_LEN + 8, ACE_MAX_FILE_SIZE + 1U);
+	assert(task_payload_validate(&head, wire + ACE_FRAME_HDR_LEN) == -1);
 }
 
 static void test_resource_limits(void)
@@ -92,47 +100,40 @@ static void test_resource_limits(void)
 
 static void test_perf_validation(void)
 {
-	struct upstream_skb_head head = {
-		.length = sizeof(struct perf_nego),
-		.theme = TASK_THEME_PERF,
-		.serial = 1,
-	};
-	struct perf_nego perf = { 0 };
+	struct ace_perf_nego nego = { .code = 1, .dual = 1 };
+	size_t length = ace_perf_nego_encode(wire, sizeof(wire), 1, &nego);
+	struct upstream_skb_head head;
 
-	assert(task_payload_validate(&head, &perf) == 0);
-	head.length++;
-	assert(task_payload_validate(&head, &perf) == -1);
+	assert(length > 0);
+	assert(task_frame_validate(wire, length, &head) == 1);
+	assert(task_payload_validate(&head, wire + ACE_FRAME_HDR_LEN) == 0);
+
+	/* Under-sized payload (payload_len < 4) */
+	ace_wr32(wire + 12, ACE_WIRE_PERF_NEGO_LEN - 1);
+	head.length = ACE_WIRE_PERF_NEGO_LEN - 1;
+	assert(task_payload_validate(&head, wire + ACE_FRAME_HDR_LEN) == -1);
 }
 
 static void test_probe_validation(void)
 {
-	struct {
-		struct task_probe probe;
-		unsigned char data[4];
-	} payload = {
-		.probe = {
-			.magic = TASK_PROBE_MAGIC,
-			.nonce = 42,
-			.data_length = 4,
-		},
-		.data = {1, 2, 3, 4},
+	unsigned char probe_data[4] = {1, 2, 3, 4};
+	struct ace_probe probe = {
+		.magic       = TASK_PROBE_MAGIC,
+		.nonce       = 42,
+		.data_length = 4,
+		.checksum    = task_checksum32(probe_data, 4),
+		.data        = probe_data,
 	};
-	struct upstream_skb_head head = {
-		.length = sizeof(payload.probe) + sizeof(payload.data),
-		.theme = TASK_THEME_PROBE,
-		.serial = 1,
-	};
-	payload.probe.checksum = task_checksum32(payload.data, sizeof(payload.data));
+	size_t length = ace_probe_encode(wire, sizeof(wire), 1, &probe);
+	struct upstream_skb_head head;
 
-	assert(task_payload_validate(&head, &payload) == 0);
-	payload.data[2] ^= 1;
-	assert(task_payload_validate(&head, &payload) == -1);
-	payload.data[2] ^= 1;
-	payload.probe.data_length++;
-	assert(task_payload_validate(&head, &payload) == -1);
-	payload.probe.data_length--;
-	head.length--;
-	assert(task_payload_validate(&head, &payload) == -1);
+	assert(length > 0);
+	assert(task_frame_validate(wire, length, &head) == 1);
+	assert(task_payload_validate(&head, wire + ACE_FRAME_HDR_LEN) == 0);
+
+	/* Corrupt data */
+	wire[ACE_FRAME_HDR_LEN + ACE_WIRE_PROBE_LEN + 2] ^= 1;
+	assert(task_payload_validate(&head, wire + ACE_FRAME_HDR_LEN) == -1);
 }
 
 static void test_receive_path(void)

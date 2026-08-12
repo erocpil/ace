@@ -51,20 +51,17 @@ static struct task_type task_type[] = {
 
 #define sendfile_nego_dump(n) \
 	do { \
-		struct sendfile_nego *_n = (n); \
-		char *p = &_n->head[0]; \
+		struct ace_sendfile_nego *_n = (n); \
 		log("sendfile nego %p", _n); \
-		log("  path %d \t %s", _n->path_len, p); \
-		p += _n->path_len; \
-		log("  file %d \t %s", _n->file_len, p); \
-		p += _n->file_len; \
-		log("  type %d \t %s", _n->type_len, p); \
-		log("  length \t %lu", _n->length); \
+		log("  path %u 	 %s", _n->path_len, _n->path); \
+		log("  file %u 	 %s", _n->file_len, _n->file); \
+		log("  type %u 	 %s", _n->type_len, _n->type); \
+		log("  length 	 %u", _n->file_length); \
 	} while (0)
 
 #define perf_nego_dump(n) \
 	do { \
-		struct perf_nego *_n = (n); \
+		struct ace_perf_nego *_n = (n); \
 		log("perf nego %p", _n); \
 		log("  code %u", _n->code); \
 		log("  dual %u", _n->dual); \
@@ -127,7 +124,7 @@ struct sendfile_task {
 	void *data;
 	size_t length;
 	size_t offset;
-	struct sendfile_nego *nego;
+	struct ace_sendfile_nego *nego;
 	/* FIXME unsigned short int -> size_t */
 	unsigned short int index;
 	struct sendfile_subtask sfst[0];
@@ -143,7 +140,7 @@ struct perf_subtask{
 struct perf_task {
 	/* thie element must be the first */
 	struct task task;
-	struct perf_nego *nego;
+	struct ace_perf_nego *nego;
 	struct perf_subtask pfst[0];
 };
 
