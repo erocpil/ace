@@ -54,4 +54,5 @@ dkms.conf
 # Build artifacts
 build/
 .deps/
+session/
 core

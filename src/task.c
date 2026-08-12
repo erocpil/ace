@@ -134,7 +134,9 @@ ssize_t sendfile_ctrl_rx(struct lsquic_stream_ctx *sc)
 	/* start each stream except stream 0 the control */
 	struct lsquic_conn *lconn = lsquic_stream_conn(sc->stream);
 	struct lsquic_conn_ctx *lconn_ctx = lsquic_conn_get_ctx(lconn);
-	assert(sc->stream == lconn_ctx->s0);
+	if (!lconn_ctx || sc->stream != lconn_ctx->s0 || !lconn_ctx->task) {
+		return TASK_FAIL;
+	}
 	struct lsquic_stream_ctx *pos = NULL;
 	if (TASK_ROLE_SEND == ((struct task*)lconn_ctx->task)->role) {
 		list_for_each_entry(pos, &lconn_ctx->running_stream_head, stream_node) {
@@ -251,15 +253,13 @@ ssize_t sendfile_tx(struct lsquic_stream_ctx *sc)
 char *magic(const char *file)
 {
 	char *type = NULL;
-	char *mgc_file="../share/misc/magic.mgc";
-
 	magic_t ctx = magic_open(0);
 	if (!ctx) {
 		eslog("magic_open(0)");
 		return NULL;
 	}
-	if (magic_load(ctx, mgc_file) != 0) {
-		eslog("magic_load(%p %s)", ctx, mgc_file);
+	if (magic_load(ctx, NULL) != 0) {
+		eslog("magic_load(%p system database)", ctx);
 		goto DONE;
 	}
 	/* libmagic frees this pointer */
@@ -298,38 +298,59 @@ int sendfile_init(struct task *task)
 	if (TASK_ROLE_RECV == task->role) {
 		struct sendfile_nego *nego = sft->nego;
 		char *p = &nego->head[0];
+		char receive_file[PATH_MAX];
 		sft->path = (char*)malloc(nego->path_len);
-		if (sft->path) {
-			memcpy(sft->path, p, nego->path_len);
+		if (!sft->path) {
+			return -1;
 		}
+		memcpy(sft->path, p, nego->path_len);
 		p += nego->path_len;
 		sft->file = (char*)malloc(nego->file_len);
-		if (sft->file) {
-			memcpy(sft->file, p, nego->file_len);
+		if (!sft->file) {
+			return -1;
 		}
+		memcpy(sft->file, p, nego->file_len);
 		p += nego->file_len;
 		sft->type = (char*)malloc(nego->type_len);
-		if (sft->type) {
-			memcpy(sft->type, p, nego->type_len);
+		if (!sft->type) {
+			return -1;
 		}
+		memcpy(sft->type, p, nego->type_len);
 		sft->length = nego->length;
-		char *file = &nego->head[nego->path_len];
-		clog("about to receive file \"%s\"", file);
+		if (task_receive_path(receive_file, sizeof(receive_file),
+				TASK_RECEIVE_ROOT, sft->file) != 0) {
+			errno = EINVAL;
+			return -1;
+		}
+		if (mkdir(TASK_RECEIVE_ROOT, 0700) != 0 && errno != EEXIST) {
+			eslog("mkdir(%s)", TASK_RECEIVE_ROOT);
+			return -1;
+		}
+		struct stat root_st;
+		if (lstat(TASK_RECEIVE_ROOT, &root_st) != 0 || !S_ISDIR(root_st.st_mode) ||
+				S_ISLNK(root_st.st_mode)) {
+			errno = ENOTDIR;
+			eslog("unsafe receive root %s", TASK_RECEIVE_ROOT);
+			return -1;
+		}
+		clog("about to receive file \"%s\"", receive_file);
 
 		ylog("receive file %s / %s", sft->path, sft->file);
 		/* subtask 0 is for stream 0 */
 		/* other stream consume subtask from [1] */
 		sft->index = 1;
 		ylog("TODO mmap()");
-		fd = open(file, O_CREAT | O_RDWR | O_TRUNC, S_IRUSR | S_IWUSR);
+		fd = open(receive_file, O_CREAT | O_RDWR | O_TRUNC | O_NOFOLLOW,
+				S_IRUSR | S_IWUSR);
 		if (fd < 0) {
-			eslog("open(\"/tmp/data\")");
-			exit(-EXIT_FAILURE);
+			eslog("open(%s)", receive_file);
+			return -1;
 		}
 		/* Stretch the file size to the size of the (mmapped) array of ints */
 		if (-1 == lseek(fd, sft->length - 1, SEEK_SET)) {
 			eslog("lseek(%d %lu)", fd, sft->length);
-			exit(-EXIT_FAILURE);
+			close(fd);
+			return -1;
 		} else {
 			/* Something needs to be written at the end of the file to
 			 * have the file actually have the new size.
@@ -337,27 +358,27 @@ int sendfile_init(struct task *task)
 			 */
 			if (1 != write(fd, "", 1)) {
 				eslog("write(%d)", fd);
-				exit(-EXIT_FAILURE);
+				close(fd);
+				return -1;
 			}
 			log("lseek(%ld) and write last byte", sft->length - 1);
 		}
 		struct stat st;
 		if (fstat(fd, &st) == -1 ) {
 			eslog("fstat()");
-			exit(-EXIT_FAILURE);
+			close(fd);
+			return -1;
 		} else {
 			log("%ld <-> %ld", st.st_size, sft->length);
 		}
-		size_t length =
-			(sft->length / sysconf(_SC_PAGE_SIZE) + 1) * sysconf(_SC_PAGE_SIZE);
-		sft->data = (char*)mmap(NULL, length, PROT_READ | PROT_WRITE,
+		sft->data = (char*)mmap(NULL, sft->length, PROT_READ | PROT_WRITE,
 				MAP_SHARED, fd, 0);
 		close(fd);
 		if ((void*)-1 == sft->data) {
 			eslog();
-			exit(-EXIT_FAILURE);
+			return -1;
 		} else {
-			log("mmap(%d %s)", fd, file);
+			log("mmap(%d %s)", fd, receive_file);
 		}
 	} else {
 		/* TASK_ROLE_SEND */
@@ -374,18 +395,20 @@ int sendfile_init(struct task *task)
 		clog("TODO File too large");
 
 		char *file = (char*)malloc(len + 1);
+		if (!file) {
+			return -1;
+		}
 		memcpy(file, (const char*)task->data + sizeof(struct upstream_skb_head), len + 1);
+		sft->source_path = file;
 		fd = open(file, O_RDONLY);
 		if (-1 == fd) {
 			elog("open(%s), %d %s", file, errno, strerror(errno));
-			// exit(-EXIT_FAILURE);
 			return -1;
 		}
 		struct stat st;
 		if (-1 == fstat(fd, &st)) {
 			elog("fstat(%d), %d %s", fd, errno, strerror(errno));
 			return -1;
-			// exit(-EXIT_FAILURE);
 		} else {
 			;
 		}
@@ -410,15 +433,15 @@ int sendfile_init(struct task *task)
 
 		char *type = magic(file);
 		if (type) {
-			size_t tlen = strlen(type) + 1;
-			sft->type = (char*)malloc(tlen);
-			if (sft->type) {
-				memcpy(sft->type, type, tlen);
-				clog("%s: %ld \"%s\"", file, tlen, sft->type);
-			}
+			sft->type = type;
+			clog("%s: %ld \"%s\"", file, strlen(type) + 1, sft->type);
 		} else {
-			/* TODO */
-			rlog("TODO");
+			static const char fallback_type[] = "application/octet-stream";
+			sft->type = strdup(fallback_type);
+			if (!sft->type) {
+				munmap(sft->data, sft->length);
+				return -1;
+			}
 		}
 		sft->file = basename(file);
 		sft->path = dirname(file);
@@ -427,6 +450,10 @@ int sendfile_init(struct task *task)
 	/* init sendfile subtask */
 	/* stream 0 is not carrying data */
 	unsigned short int n_sub_data = task->n_sub - 1;
+	if (!ace_task_memory_valid(n_sub_data, SENDFILE_BLOCK_SIZE)) {
+		errno = ENOMEM;
+		return -1;
+	}
 	size_t quota = sft->length / n_sub_data;
 
 	ylog("checking if quota(%lu) exceeds 4G %lu SENDFILE_BLOCK_SIZE(%lu)",
@@ -457,7 +484,9 @@ int sendfile_init(struct task *task)
 		tl += sft->sfst[i].length;
 	}
 	ylog("%s %s %ld <=> %ld", sft->path, sft->file, sft->length, tl);
-	assert(sft->length == tl);
+	if (sft->length != tl) {
+		return -1;
+	}
 
 	return 0;
 }
@@ -467,6 +496,12 @@ int sendfile_nego(struct task *task, struct sk_buff* skb)
 	struct sendfile_task *sft = container_of(task, struct sendfile_task, task);
 
 	if (TASK_ROLE_RECV == task->role) {
+		struct upstream_skb_head head;
+		if (task_frame_validate(skb->head, skb->len, &head) != 1 ||
+				task_payload_validate(&head, skb->head + sizeof(head)) != 0) {
+			errno = EPROTO;
+			return -1;
+		}
 		struct sendfile_nego *nego =
 			(struct sendfile_nego*)((char*)skb->head +
 					sizeof(struct upstream_skb_head));
@@ -578,30 +613,39 @@ int sendfile_done(struct lsquic_stream_ctx *sc)
 
 	if (task->n_sub_done == (size_t)(task->n_sub)) {
 		/* this is stream 0 */
-		assert(!lsquic_stream_id(sc->stream));
+		if (lsquic_stream_id(sc->stream) != 0) {
+			return TASK_FAIL;
+		}
 		ylog("all %lu streams are done, task exiting", task->n_sub_done);
 		task->data = (void*)lstream_ctx_del_rxq_first(sc);
 		return TASK_EXIT;
 	}
 
-	struct sendfile_task *sft = container_of(task, struct sendfile_task, task);
-	/* all done */
-	if (-1 == munmap(sft->data, sft->length)) {
-		eslog("munmap(%p %lu", sft->data, sft->length);
-		return TASK_FAIL;
-	}
-	ylog("%s / %s munmap(%p %lu) done",
-			sft->path, sft->file, sft->data, sft->length);
-
-	return TASK_EXIT;
+	return TASK_FAIL;
 }
 
 struct sk_buff *sendfile_exit(struct task *task)
 {
 	TASK_DUMP(task);
-	// SKB_DUMP((struct sk_buff*)task->data);
 	task_exit(task);
-	return (struct sk_buff*)task->data;
+	struct sendfile_task *sft = container_of(task, struct sendfile_task, task);
+	if (sft->data && sft->length > 0) {
+		if (munmap(sft->data, sft->length) != 0) {
+			eslog("munmap(%p %lu)", sft->data, sft->length);
+		}
+		sft->data = NULL;
+	}
+	if (task->role == TASK_ROLE_RECV) {
+		free(sft->path);
+		free(sft->file);
+		free(sft->type);
+	} else {
+		free(sft->source_path);
+		free(sft->type);
+		free(sft->nego);
+	}
+	free(sft);
+	return NULL;
 }
 
 struct task* (*task_create_entity_func[TASK_TYPE_MAX])(unsigned short) = {
@@ -612,11 +656,14 @@ struct task* (*task_create_entity_func[TASK_TYPE_MAX])(unsigned short) = {
 
 struct task *task_create(struct sk_buff *skb, int role)
 {
-	struct upstream_skb_head *head = (struct upstream_skb_head*)skb->head;
+	struct upstream_skb_head validated;
+	struct upstream_skb_head *head;
 
-	if (role >= TASK_ROLE_MAX) {
+	if (!skb || role < 0 || role >= TASK_ROLE_MAX ||
+			task_frame_validate(skb->head, skb->len, &validated) != 1) {
 		return NULL;
 	}
+	head = (struct upstream_skb_head*)skb->head;
 
 	int type = head->theme;
 	int num = 0;
@@ -702,13 +749,21 @@ int perf_init(struct task *task)
 	struct perf_task *pft = container_of(task, struct perf_task, task);
 	struct perf_subtask *pfst = NULL;
 	unsigned short int n_sub_data = task->n_sub - 1;
+	if (!ace_task_memory_valid(n_sub_data, SENDFILE_BLOCK_SIZE)) {
+		errno = ENOMEM;
+		return -1;
+	}
 
 	log("pfst[0] %p", &pft->pfst[0]);
 	for (int i = 1; i <= n_sub_data; i++) {
 		pfst = &pft->pfst[i];
 		pfst->data = (void*)malloc(SENDFILE_BLOCK_SIZE);
 		if (!pfst->data) {
-			exit(-EXIT_FAILURE);
+			for (int j = 1; j < i; ++j) {
+				free(pft->pfst[j].data);
+				pft->pfst[j].data = NULL;
+			}
+			return -1;
 		}
 		pfst->length = SENDFILE_BLOCK_SIZE;
 		pfst->offset = 0;
@@ -722,6 +777,12 @@ int perf_nego(struct task *task, struct sk_buff* skb)
 	struct perf_task *pft = container_of(task, struct perf_task, task);
 
 	if (TASK_ROLE_RECV == task->role) {
+		struct upstream_skb_head head;
+		if (task_frame_validate(skb->head, skb->len, &head) != 1 ||
+				task_payload_validate(&head, skb->head + sizeof(head)) != 0) {
+			errno = EPROTO;
+			return -1;
+		}
 		struct perf_nego *nego =
 			(struct perf_nego*)((char*)skb->head +
 					sizeof(struct upstream_skb_head));
@@ -810,7 +871,9 @@ ssize_t perf_ctrl_rx(struct lsquic_stream_ctx *sc)
 	/* start each stream except stream 0 the control */
 	struct lsquic_conn *lconn = lsquic_stream_conn(sc->stream);
 	struct lsquic_conn_ctx *lconn_ctx = lsquic_conn_get_ctx(lconn);
-	assert(sc->stream == lconn_ctx->s0);
+	if (!lconn_ctx || sc->stream != lconn_ctx->s0 || !lconn_ctx->task) {
+		return TASK_FAIL;
+	}
 	struct lsquic_stream_ctx *pos = NULL;
 	if (TASK_ROLE_SEND == ((struct task*)lconn_ctx->task)->role) {
 		list_for_each_entry(pos, &lconn_ctx->running_stream_head, stream_node) {

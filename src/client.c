@@ -3,6 +3,8 @@
 #include "link.h"
 #include "runner.h"
 
+static int client_process_upstream_read(struct upstream_echo *echo);
+
 struct client *client_init()
 {
 	struct client *ct = (struct client*)malloc(sizeof(struct client));
@@ -51,6 +53,7 @@ int client_launch_service(struct client *ct, struct config_manager *cm)
 		se->loop = (void*)evl;
 		se->run_event = client_run_event;
 		se->process = client_process_service;
+		se->stop_event = client_stop_event;
 		client_add_service(ct, se);
 	}
 
@@ -79,12 +82,109 @@ int client_run(struct client *ct)
 		ace_runner_run_service(&ct->n_running_service, pos);
 	}
 
-	return ace_runner_run(ct->loop, &ct->tw,
+	int result = ace_runner_run(ct->loop, &ct->tw,
 			ct->n_service, (void*)ct,
 			client_timeout_cb);
+	ace_runner_stop_services(&ct->service_head);
+	if (ace_runner_join_services(&ct->service_head,
+			&ct->n_running_service) != 0) {
+		result = -1;
+	}
+	return result;
 }
 
 #define client_recv_data ace_runner_recv_data
+
+static const uint64_t client_probe_nonce = UINT64_C(0x1020304050607080);
+
+static ssize_t client_probe_rx(struct lsquic_stream_ctx *sc)
+{
+	struct upstream_skb_head head;
+	struct task_probe probe;
+
+	if (task_frame_validate(sc->rx->head, sc->rx->len, &head) == 0) {
+		return TASK_GOON;
+	}
+	if (task_frame_validate(sc->rx->head, sc->rx->len, &head) != 1 ||
+			task_payload_validate(&head, sc->rx->head + sizeof(head)) != 0 ||
+			head.theme != TASK_THEME_PROBE) {
+		return TASK_FAIL;
+	}
+	memcpy(&probe, sc->rx->head + sizeof(head), sizeof(probe));
+	if (probe.nonce != client_probe_nonce) {
+		return TASK_FAIL;
+	}
+	log("QUIC_PROBE_OK nonce=%lu bytes=%u checksum=%08x",
+			probe.nonce, probe.data_length, probe.checksum);
+	/* The probe establishes that the control stream works; keep it available
+	 * for the real task negotiation that follows. */
+	sc->rx->len = 0;
+	sc->rx->tail = 0;
+	sc->rx->offset = 0;
+	sc->rx->data = sc->rx->head;
+	struct lsquic_conn_ctx *lconn_ctx =
+		lsquic_conn_get_ctx(lsquic_stream_conn(sc->stream));
+	struct upstream_echo *echo = lconn_ctx ? lconn_ctx->internal : NULL;
+	if (echo && echo->n_rq > 0 && client_process_upstream_read(echo) < 0) {
+		return TASK_FAIL;
+	}
+	return TASK_GOON;
+}
+
+static ssize_t client_probe_tx(struct lsquic_stream_ctx *sc)
+{
+	lsquic_stream_wantwrite(sc->stream, 0);
+	lsquic_stream_wantread(sc->stream, 1);
+	return TASK_GOON;
+}
+
+static struct subtask client_probe_subtask = {
+	.rx_func = client_probe_rx,
+	.tx_func = client_probe_tx,
+};
+
+int client_connect_once(struct service *se)
+{
+	struct client_event_loop *evl;
+	struct co_config *co;
+	struct connote *ce;
+	struct client_event *event;
+
+	if (!se || !se->loop || list_empty(&se->config.co_config_head)) {
+		errno = EINVAL;
+		return -1;
+	}
+	evl = (struct client_event_loop *)se->loop;
+	if (!evl->loop) {
+		errno = EINVAL;
+		return -1;
+	}
+	co = list_first_entry(&se->config.co_config_head,
+			struct co_config, co_config_node);
+	ce = connote_init(co);
+	if (!ce) {
+		return -1;
+	}
+	event = calloc(1, sizeof(*event));
+	if (!event) {
+		connote_free(ce);
+		return -1;
+	}
+	ce->event = event;
+	service_add_connote(se, ce);
+	event->w.data = ce;
+	ev_io_init(&event->w, client_recv_data, ce->fd, EV_READ);
+	ev_io_start(evl->loop, &event->w);
+	if (!service_connect(ce)) {
+		ev_io_stop(evl->loop, &event->w);
+		service_del_connote(ce);
+		connote_free(ce);
+		free(event);
+		return -1;
+	}
+	log("AUTO_CONNECT_STARTED host=%s port=%u", co->host, co->port);
+	return 0;
+}
 
 static inline void client_timer_expired(EV_P_ ev_timer *timer, int revents)
 {
@@ -93,19 +193,17 @@ static inline void client_timer_expired(EV_P_ ev_timer *timer, int revents)
 
 static void client_async_w_cb(EV_P_ ev_async *w, int revents)
 {
-	return;
-	/* TEST */
-	slog();
-
-	static int i = 0;
 	struct service *se = (struct service*)w->data;
-
-	if (service_is_running(se)) {
-		ylog();
-		i++;
+	if (service_is_stopped(se)) {
+		ev_break(EV_A_ EVBREAK_ALL);
 	}
-	if (i == 3) {
-		rlog();
+}
+
+void client_stop_event(struct service *se)
+{
+	struct client_event_loop *evl = (struct client_event_loop*)se->loop;
+	if (evl && evl->loop) {
+		ev_async_send(evl->loop, &evl->async_w);
 	}
 }
 
@@ -250,6 +348,10 @@ static int client_process_upstream_read(struct upstream_echo *echo)
 			/* no need to assign rx/tx buffer */
 			struct lsquic_stream_ctx *sc =
 				service_stream_ctx_malloc(lconn_ctx->ce->cc, 0, 0);
+			if (!sc) {
+				lsquic_conn_abort(lconn_ctx->lconn);
+				return -1;
+			}
 			sc->subtask = task_get_sub_at(task, i);
 			lconn_ctx_add_pending_stream_ctx(lconn_ctx, sc);
 			lsquic_conn_make_stream(lconn_ctx->lconn);
@@ -274,6 +376,7 @@ static int client_process_upstream_write(struct upstream_echo *echo, struct sk_b
 /* !!!run in service thread or process!!! */
 int client_run_event(struct service *se)
 {
+	int result = -1;
 	log();
 	if (!se) {
 		elog();
@@ -302,8 +405,8 @@ int client_run_event(struct service *se)
 
 	/* init */
 	evl->loop = ev_loop_new(flags);
+	ev_timer_init(&evl->timer, client_timer_expired, 0., 0.);
 	evl->timer.data = se;
-	ev_init(&evl->timer, client_timer_expired);
 
 	ev_async_init(&evl->async_w, client_async_w_cb);
 	evl->async_w.data = (void*)se;
@@ -313,29 +416,50 @@ int client_run_event(struct service *se)
 			client_process_upstream_read, NULL, 0);
 	if (!evl->up) {
 		eslog("upstream_init()");
-		upstream_free(evl->up);
-		return -1;
+		goto cleanup_loop;
 	}
 	evl->up->entity = (void*)se;
 
 	/* run */
 	if (0 != upstream_listen(evl->up)) {
 		elog("upstream_listen() failed");
-		return -1;
+		goto cleanup_upstream;
 	}
 
 	ev_async_start(evl->loop, &evl->async_w);
+	if (service_is_stopped(se)) {
+		result = 0;
+		goto cleanup_async;
+	}
+	if (cc->auto_connect && client_connect_once(se) != 0) {
+		eslog("client_connect_once()");
+		goto cleanup_async;
+	}
 
 	ev_run(evl->loop, 0);
+	service_set_stopped(se);
 	rlog();
+	result = 0;
 
-	return 0;
+cleanup_async:
+	ev_async_stop(evl->loop, &evl->async_w);
+cleanup_upstream:
+	upstream_free(evl->up);
+	evl->up = NULL;
+cleanup_loop:
+	ev_loop_destroy(evl->loop);
+	evl->loop = NULL;
+	return result;
 }
 
 lsquic_conn_ctx_t *client_on_new_conn(void *stream_if_ctx, struct lsquic_conn *conn)
 {
 	struct service *se = (struct service*)stream_if_ctx;
 	struct lsquic_conn_ctx *lconn_ctx = lconn_ctx_malloc();
+	if (!lconn_ctx) {
+		lsquic_conn_abort(conn);
+		return NULL;
+	}
 	lconn_ctx->ce = lsquic_conn_get_peer_ctx(conn, NULL);
 	clog("ce %p from lsquic_engine_connect()", lconn_ctx->ce);
 	lconn_ctx->lconn = conn;
@@ -344,6 +468,10 @@ lsquic_conn_ctx_t *client_on_new_conn(void *stream_if_ctx, struct lsquic_conn *c
 	lsquic_conn_set_ctx(conn, lconn_ctx);
 	struct lsquic_stream_ctx *sc =
 		service_stream_ctx_malloc_pending(conn, -1, -1);
+	if (!sc) {
+		lsquic_conn_abort(conn);
+		return lconn_ctx;
+	}
 	ylog("pending sc %p for s0", sc);
 	lsquic_conn_make_stream(conn);
 
@@ -371,13 +499,18 @@ void client_on_conn_closed(lsquic_conn_t *conn)
 
 	service_del_client_conn(se, lconn_ctx);
 
-	if (ev_is_active(&ev->w)) {
+	if (evl->loop && ev_is_active(&ev->w)) {
 		ylog("ev_io_stop(service %p connote %p fd %d)", se, ce, ce->fd);
 		ev_io_stop(evl->loop, &ev->w);
 	}
 
 	struct sk_buff *skb = NULL;
 	struct task *task = (struct task*)lconn_ctx->task;
+	if (service_is_running(se) && (!task || task->n_sub_done < task->n_sub)) {
+		se->run_result = -1;
+		elog("QUIC_EVENT connection status=lost task_complete=%d",
+				task && task->n_sub_done >= task->n_sub);
+	}
 	if (task) {
 		/* if this conn has been assigned a task */
 		ylog("task exit");
@@ -438,12 +571,40 @@ lsquic_stream_ctx_t *client_on_new_stream(void *stream_if_ctx, struct lsquic_str
 	struct lsquic_stream_ctx *sc = NULL;
 
 	if (!id) {
+		size_t probe_frame_length = sizeof(struct upstream_skb_head) +
+			sizeof(struct task_probe) + TASK_PROBE_DATA_SIZE;
 		sc = lconn_ctx->pending;
+		if (!sc || !sc->tx || sc->tx->end < probe_frame_length) {
+			lsquic_conn_abort(lconn);
+			return NULL;
+		}
 		sc->stream = stream;
 		rlog("TODO stream(0) %p", stream);
 		rlog("s0 %p sc %p %p", stream, lsquic_stream_get_ctx(stream), sc);
 		lconn_ctx->s0 = stream;
 		lconn_ctx->pending = NULL;
+		struct upstream_skb_head probe_head = {
+			.length = sizeof(struct task_probe) + TASK_PROBE_DATA_SIZE,
+			.theme = TASK_THEME_PROBE,
+			.serial = 1,
+		};
+		struct task_probe probe = {
+			.magic = TASK_PROBE_MAGIC,
+			.nonce = client_probe_nonce,
+			.data_length = TASK_PROBE_DATA_SIZE,
+		};
+		unsigned char *probe_data = sc->tx->head + sizeof(probe_head) + sizeof(probe);
+		for (size_t i = 0; i < TASK_PROBE_DATA_SIZE; ++i) {
+			probe_data[i] = (unsigned char)(i * 31U + 7U);
+		}
+		probe.checksum = task_checksum32(probe_data, TASK_PROBE_DATA_SIZE);
+		memcpy(sc->tx->head, &probe_head, sizeof(probe_head));
+		memcpy(sc->tx->head + sizeof(probe_head), &probe, sizeof(probe));
+		sc->tx->data = sc->tx->head;
+		sc->tx->len = probe_frame_length;
+		sc->tx->tail = sc->tx->len;
+		sc->tx->offset = 0;
+		sc->subtask = &client_probe_subtask;
 		lsquic_stream_wantwrite(stream, 1);
 		return sc;
 	}
@@ -453,7 +614,6 @@ lsquic_stream_ctx_t *client_on_new_stream(void *stream_if_ctx, struct lsquic_str
 	switch (type) {
 		case 0x00:
 			ylog("bi stream from client %p %p", stream, sc);
-			assert(stream_is_cibi(stream));
 			sc = lconn_ctx_del_pending_stream_ctx(lconn_ctx);
 			if (sc) {
 				rlog("s %p sc %p st %p", stream, sc, sc->subtask);
@@ -462,16 +622,13 @@ lsquic_stream_ctx_t *client_on_new_stream(void *stream_if_ctx, struct lsquic_str
 			break;
 		case 0x01:
 			ylog("bi stream from server %p %p", stream, sc);
-			assert(stream_is_sibi(stream));
 			rlog("N/A");
 			break;
 		case 0x02:
 			ylog("un stream from client %p %p", stream, sc);
-			assert(stream_is_ciun(stream));
 			break;
 		case 0x03:
 			ylog("un stream from server %p %p", stream, sc);
-			assert(stream_is_siun(stream));
 			break;
 		default:
 			break;
@@ -551,10 +708,12 @@ void client_on_hsk_done(lsquic_conn_t *conn, enum lsquic_hsk_status status)
 				upstream_skb_head_dump((struct upstream_skb_head*)skb->head);
 #if 1
 				struct upstream_echo *echo = (struct upstream_echo*)lconn_ctx->internal;
-				if (echo) {
-					ylog("echo back");
-					client_process_upstream_write(echo, skb);
-				}
+					if (echo) {
+						ylog("echo back");
+						client_process_upstream_write(echo, skb);
+					} else {
+						skb_free(skb);
+					}
 #endif
 			}
 			break;
@@ -586,17 +745,23 @@ void client_on_hsk_done(lsquic_conn_t *conn, enum lsquic_hsk_status status)
 				upstream_skb_head_dump((struct upstream_skb_head*)skb->head);
 #if 1
 				struct upstream_echo *echo = (struct upstream_echo*)lconn_ctx->internal;
-				if (echo) {
-					ylog("echo back");
-					client_process_upstream_write(echo, skb);
-				}
+					if (echo) {
+						ylog("echo back");
+						client_process_upstream_write(echo, skb);
+					} else {
+						skb_free(skb);
+					}
 #endif
 			}
 			break;
 		default:
 			{
-				log("handshake failed");
-				ylog("TODO hsk_failed call_back(), maybe delete session file");
+				struct lsquic_conn_ctx *lconn_ctx = lsquic_conn_get_ctx(conn);
+				if (lconn_ctx && lconn_ctx->ce && lconn_ctx->ce->service) {
+					lconn_ctx->ce->service->run_result = -1;
+				}
+				elog("QUIC_EVENT handshake status=failed code=%d", status);
+				lsquic_conn_abort(conn);
 			}
 			break;
 	}
@@ -625,14 +790,23 @@ void client_process_service(EV_P_ struct service *se)
 	int diff;
 	ev_tstamp timeout;
 	struct client_event_loop *evl = (struct client_event_loop*)se->loop;
+	if (se->processing) {
+		se->process_pending = 1;
+		return;
+	}
+	se->processing = 1;
 
 	ev_timer_stop(EV_A_ &evl->timer);
 	if (service_is_stopped(se)) {
 		elog("service %p is stopped %d", se, se->state);
+		se->processing = 0;
 		return;
 	}
 
-	lsquic_engine_process_conns(se->engine);
+	do {
+		se->process_pending = 0;
+		lsquic_engine_process_conns(se->engine);
+	} while (se->process_pending);
 
 	if (lsquic_engine_earliest_adv_tick(se->engine, &diff)) {
 		if (diff >= LSQUIC_DF_CLOCK_GRANULARITY) {
@@ -643,10 +817,10 @@ void client_process_service(EV_P_ struct service *se)
 			timeout = (ev_tstamp) LSQUIC_DF_CLOCK_GRANULARITY / 1000000;
 		}
 		// ylog("timeout %f", timeout);
-		ev_timer_init(&evl->timer, client_timer_expired, timeout, 0.);
-		evl->timer.data = (void*)se;
+		ev_timer_set(&evl->timer, timeout, 0.);
 		ev_timer_start(EV_A_ &evl->timer);
 	} else {
 		plog("no more connection");
 	}
+	se->processing = 0;
 }

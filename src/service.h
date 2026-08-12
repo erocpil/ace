@@ -10,6 +10,7 @@
 #include "sk_buff.h"
 #include "list.h"
 #include "hash.h"
+#include "resource_limits.h"
 
 #define SE_RUNNING (1 << 0)
 #define SE_STOPPED (1 << 1)
@@ -19,6 +20,8 @@
 #define ECN_SZ CMSG_SPACE(sizeof(int))
 /* Amount of space required for incoming ancillary data */
 #define CTL_SZ (CMSG_SPACE(MAX(DST_MSG_SZ, sizeof(struct sockaddr_in6))) + ECN_SZ)
+
+struct ev_loop;
 
 /* one service represents a type of connections driven by an identical lsquic engine,
  * aka. with same params, they all run in the same thread or process */
@@ -45,8 +48,12 @@ struct service {
 
 	void *loop;
 	// size_t (*add_event)();
-	int (*run_event)();
+	int (*run_event)(struct service *);
 	void (*process)(struct ev_loop *, struct service*);
+	void (*stop_event)(struct service *);
+	pthread_t thread;
+	int thread_started;
+	int run_result;
 
 	/* log */
 	FILE *s_log_fh;
@@ -54,6 +61,8 @@ struct service {
 
 	// void *data;
 	int state;
+	int processing;
+	int process_pending;
 
 	struct config config;
 
@@ -83,33 +92,45 @@ struct lsquic_stream_ctx {
 	unsigned short int end_action;
 };
 
-#define lstream_ctx_malloc() \
-	({ \
-	 size_t len = sizeof(struct lsquic_stream_ctx); \
-	 void *r = malloc(len); \
-	 memset(r, 0, len); \
-	 })
+static inline struct lsquic_stream_ctx *lstream_ctx_malloc(void)
+{
+	return calloc(1, sizeof(struct lsquic_stream_ctx));
+}
 
 static inline uint32_t lstream_ctx_add_rxq(struct lsquic_stream_ctx *sc, struct sk_buff *skb)
 {
+	if (!sc || !skb || !ace_quota_can_add(sc->n_rxq, ACE_MAX_STREAM_QUEUE)) {
+		errno = ENOBUFS;
+		return 0;
+	}
 	list_add_tail(&skb->skb_node, &sc->rxq);
 	return ++sc->n_rxq;
 }
 
 static inline uint32_t lstream_ctx_del_rxq(struct lsquic_stream_ctx *sc, struct sk_buff *skb)
 {
+	if (!sc || !skb || sc->n_rxq == 0) {
+		return 0;
+	}
 	list_del(&skb->skb_node);
 	return --sc->n_rxq;
 }
 
 static inline uint32_t lstream_ctx_add_txq(struct lsquic_stream_ctx *sc, struct sk_buff *skb)
 {
+	if (!sc || !skb || !ace_quota_can_add(sc->n_txq, ACE_MAX_STREAM_QUEUE)) {
+		errno = ENOBUFS;
+		return 0;
+	}
 	list_add_tail(&skb->skb_node, &sc->txq);
 	return ++sc->n_txq;
 }
 
 static inline uint32_t lstream_ctx_del_txq(struct lsquic_stream_ctx *sc, struct sk_buff *skb)
 {
+	if (!sc || !skb || sc->n_txq == 0) {
+		return 0;
+	}
 	list_del(&skb->skb_node);
 	return --sc->n_txq;
 }
@@ -117,6 +138,9 @@ static inline uint32_t lstream_ctx_del_txq(struct lsquic_stream_ctx *sc, struct 
 static inline struct sk_buff *lstream_ctx_del_rxq_first(struct lsquic_stream_ctx *sc)
 {
 	struct sk_buff *skb = list_first_entry_or_null(&sc->rxq, struct sk_buff, skb_node);
+	if (!skb) {
+		return NULL;
+	}
 	lstream_ctx_del_rxq(sc, skb);
 	sc->rx = NULL;
 
@@ -126,6 +150,9 @@ static inline struct sk_buff *lstream_ctx_del_rxq_first(struct lsquic_stream_ctx
 static inline struct sk_buff *lstream_ctx_del_txq_first(struct lsquic_stream_ctx *sc)
 {
 	struct sk_buff *skb = list_first_entry_or_null(&sc->txq, struct sk_buff, skb_node);
+	if (!skb) {
+		return NULL;
+	}
 	lstream_ctx_del_txq(sc, skb);
 	sc->tx = NULL;
 
@@ -158,16 +185,17 @@ struct lsquic_conn_ctx {
 	int session_resume_saved;
 };
 
-#define lconn_ctx_malloc() \
-	({ \
-	 size_t len = sizeof(struct lsquic_conn_ctx); \
-	 struct lsquic_conn_ctx *r = malloc(len); \
-	 memset(r, 0, len); \
-	 INIT_LIST_HEAD(&r->conn_node); \
-	 INIT_LIST_HEAD(&r->running_stream_head); \
-	 INIT_LIST_HEAD(&r->pending_stream_head); \
-	 r; \
-	 })
+static inline struct lsquic_conn_ctx *lconn_ctx_malloc(void)
+{
+	struct lsquic_conn_ctx *r = calloc(1, sizeof(*r));
+	if (!r) {
+		return NULL;
+	}
+	INIT_LIST_HEAD(&r->conn_node);
+	INIT_LIST_HEAD(&r->running_stream_head);
+	INIT_LIST_HEAD(&r->pending_stream_head);
+	return r;
+}
 
 #define lconn_ctx_add_running_stream_ctx(lc, sc) \
 	do { \

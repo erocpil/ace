@@ -3,6 +3,10 @@
 #include <sys/types.h>
 #include "service.h"
 #include "task.h"
+#include "udp_send.h"
+#include "io_retry.h"
+#include "net_addr.h"
+#include "quic_global.h"
 
 static inline int service_init_ssl_ctx(struct service *se);
 static int service_init_ssl_ctx_server(struct service *se);
@@ -156,6 +160,9 @@ struct service *service_init_engine(struct service *se)
 	es->es_handshake_to = 3000000;
 	es->es_ping_period = 2;
 	es->es_idle_timeout = 3;
+	/* Bound detection of a path that remains open locally but makes no QUIC
+	 * progress (for example, a crashed or partitioned peer). */
+	es->es_noprogress_timeout = 3;
 	// es->es_versions = LSQVER_I001;
 	// es->es_ql_bits = 0;
 	// on_datagram
@@ -175,7 +182,10 @@ struct service *service_init_engine(struct service *se)
 	// lsquic_set_log_level("warn");
 	lsquic_set_log_level(se->config.log_level);
 
-	lsquic_global_init(flags & LSENG_SERVER ? LSQUIC_GLOBAL_SERVER : LSQUIC_GLOBAL_CLIENT);
+	if (ace_quic_global_init() != 0) {
+		elog("lsquic_global_init()");
+		return NULL;
+	}
 
 	ea = se->engine_api;
 	ea->ea_settings = es;
@@ -221,8 +231,10 @@ int service_init_cert_hash(struct service *se)
 {
 	size_t n_bucket = se->config.n_cert_hash_bucket;
 	size_t n_elem = se->config.n_cert_hash_elem;
-	assert(n_bucket);
-	assert(n_elem);
+	if (!n_bucket || !n_elem) {
+		errno = EINVAL;
+		return -1;
+	}
 
 	// TODO check n_bucket and n_elem
 	se->cert_hash = ace_hash_create(n_bucket, n_elem);
@@ -334,6 +346,10 @@ static void service_keylog_line(const SSL *ssl, const char *line)
 
 static int service_init_ssl_ctx_map(struct service *se)
 {
+	const char *cert_file = getenv("ACE_CERT_FILE");
+	const char *key_file = getenv("ACE_KEY_FILE");
+	if (!cert_file || !*cert_file) cert_file = ACE_DEFAULT_CERT_FILE;
+	if (!key_file || !*key_file) key_file = ACE_DEFAULT_KEY_FILE;
 	SSL_CTX *ssl_ctx = SSL_CTX_new(TLS_method());
 	if (!ssl_ctx) {
 		log();
@@ -350,8 +366,8 @@ static int service_init_ssl_ctx_map(struct service *se)
 		if (!SSL_CTX_load_verify_locations(
 					ssl_ctx, "root.cert.pem", NULL)) {
 			elog("Failed to load root certificates.\n");
-			exit(-1);
-			return -1;
+				SSL_CTX_free(ssl_ctx);
+				return -1;
 		}
 		log("Setting verify");
 		SSL_CTX_set_verify(ssl_ctx,
@@ -360,17 +376,17 @@ static int service_init_ssl_ctx_map(struct service *se)
 	} else {
 		log("Setting no verify");
 	}
-	log("Setting cert %s", "cert.pem");
+	log("Setting cert %s", cert_file);
 	if (1 != SSL_CTX_use_certificate_chain_file(
-				ssl_ctx, "cert.pem")) {
+				ssl_ctx, cert_file)) {
 		eslog("SSL_CTX_use_certificate_chain_file()");
 		SSL_CTX_free(ssl_ctx);
 		return -1;
 	}
 	/* TODO .pkcs8 file */
-	log("Setting psk %s", "rsa_private.key");
+	log("Setting psk %s", key_file);
 	if (1 != SSL_CTX_use_PrivateKey_file(
-				ssl_ctx, "rsa_private.key",
+				ssl_ctx, key_file,
 				SSL_FILETYPE_PEM)) {
 		elog("SSL_CTX_use_PrivateKey_file()");
 		SSL_CTX_free(ssl_ctx);
@@ -445,6 +461,10 @@ static int service_init_ssl_ctx_map(struct service *se)
 
 static int service_init_ssl_ctx_server(struct service *se)
 {
+	const char *cert_file = getenv("ACE_CERT_FILE");
+	const char *key_file = getenv("ACE_KEY_FILE");
+	if (!cert_file || !*cert_file) cert_file = ACE_DEFAULT_CERT_FILE;
+	if (!key_file || !*key_file) key_file = ACE_DEFAULT_KEY_FILE;
 	SSL_CTX *ssl_ctx = SSL_CTX_new(TLS_method());
 	if (!ssl_ctx) {
 		elog("SSL_CTX_new()");
@@ -455,12 +475,12 @@ static int service_init_ssl_ctx_server(struct service *se)
 	SSL_CTX_set_default_verify_paths(ssl_ctx);
 
 	/* Load self-signed certificate */
-	if (1 != SSL_CTX_use_certificate_file(ssl_ctx, "certs/server.crt", SSL_FILETYPE_PEM)) {
+	if (1 != SSL_CTX_use_certificate_file(ssl_ctx, cert_file, SSL_FILETYPE_PEM)) {
 		elog("SSL_CTX_use_certificate_file()");
 		SSL_CTX_free(ssl_ctx);
 		return -1;
 	}
-	if (1 != SSL_CTX_use_PrivateKey_file(ssl_ctx, "certs/server.key", SSL_FILETYPE_PEM)) {
+	if (1 != SSL_CTX_use_PrivateKey_file(ssl_ctx, key_file, SSL_FILETYPE_PEM)) {
 		elog("SSL_CTX_use_PrivateKey_file()");
 		SSL_CTX_free(ssl_ctx);
 		return -1;
@@ -475,14 +495,14 @@ static int service_init_ssl_ctx_server(struct service *se)
 /* TODO check path/file length */
 /* TODO append alpn */
 /* FIXME se->alpn */
-#define session_resume_file_path(sess, path, peer, dev) \
-do { \
-	char _ip[INET_ADDRSTRLEN]; \
-	struct sockaddr_in *_peer = (struct sockaddr_in*)(peer); \
-	inet_ntop(AF_INET, &_peer->sin_addr, _ip, sizeof(_ip)); \
-	snprintf((sess), sizeof(sess), "%s/%s_%d-%s", \
-			(path), _ip, ntohs(_peer->sin_port), (dev)); \
-} while (0)
+static int session_resume_file_path(char *output, size_t output_size,
+		const char *path, const struct sockaddr *peer, const char *device)
+{
+	char key[INET6_ADDRSTRLEN + 16];
+	if (!path || ace_sockaddr_key(peer, key, sizeof(key)) != 0) return -1;
+	return snprintf(output, output_size, "%s/%s-%s", path, key,
+			device ? device : "") < (int)output_size ? 0 : -1;
+}
 
 int on_new_session(SSL *ssl, SSL_SESSION *session)
 {
@@ -510,26 +530,33 @@ int on_new_session(SSL *ssl, SSL_SESSION *session)
 	const struct sockaddr *peer = NULL;
 	int addr = lsquic_conn_get_sockaddr(lconn, &local, &peer);
 	if (local && peer) {
-		char s[16] = { 0 };
-		strncpy(s, inet_ntoa(((struct sockaddr_in*)peer)->sin_addr), 16);
+		char local_text[80] = { 0 };
+		char peer_text[80] = { 0 };
+		if (ace_sockaddr_format(local, local_text, sizeof(local_text)) != 0 ||
+				ace_sockaddr_format(peer, peer_text, sizeof(peer_text)) != 0) {
+			return 0;
+		}
 		log("confirmed connection on net_dev " Yellow "%s " RESET
-				"local " Cyan "%s:%u " RESET
-				"peer " Green "%s:%u" RESET,
+				"local " Cyan "%s " RESET
+				"peer " Green "%s" RESET,
 				lconn_ctx->ce->cc->if_name,
-				inet_ntoa(((struct sockaddr_in*)local)->sin_addr),
-				ntohs(((struct sockaddr_in*)local)->sin_port),
-				s,
-				ntohs(((struct sockaddr_in*)peer)->sin_port));
+				local_text, peer_text);
 	} else {
 		elog();
 		return 0;
 	}
 
 	char sess[512] = { 0 };
-	session_resume_file_path(sess, lconn_ctx->ce->service->config.session_path,
-			(struct sockaddr_in*)peer,
+	const char *session_path = lconn_ctx->ce->service->config.session_path;
+	if (mkdir(session_path, 0700) != 0 && errno != EEXIST) {
+		eslog("cannot create session directory %s: %s",
+				session_path, strerror(errno));
+		return 0;
+	}
+	if (session_resume_file_path(sess, sizeof(sess),
+			lconn_ctx->ce->service->config.session_path, peer,
 			// lconn_ctx->ce->service->alpn,
-			lconn_ctx->ce->cc->if_name);
+			lconn_ctx->ce->cc->if_name) != 0) return 0;
 
 	if (0 != lsquic_ssl_sess_to_resume_info(ssl, session, &buf, &bufsz)) {
 		elog("lsquic_ssl_sess_to_resume_info failed");
@@ -626,23 +653,33 @@ void *service_func(void *arg)
 			getpid(), gettid(), pthread_self());
 	set_affinity(se->config.cpu);
 
-	service_init_engine(se);
+	se->run_result = 1;
+	if (!service_init_engine(se)) {
+		se->run_result = -1;
+		elog("QUIC_EVENT service_start status=failed stage=engine");
+		return NULL;
+	}
 
 	service_init_cert_hash(se);
 
 	if (-1 == service_init_ssl_ctx_map(se)) {
-		elog("service_init_ssl_ctx_map failed");
+		se->run_result = -1;
+		elog("QUIC_EVENT service_start status=failed stage=tls");
 		lsquic_engine_destroy(se->engine);
 		return NULL;
 	}
 
-	se->run_event(se);
+	int event_result = se->run_event(se);
+	if (event_result != 0 || se->run_result < 0) {
+		se->run_result = -1;
+	} else {
+		se->run_result = 0;
+	}
+	log("QUIC_EVENT service_stop status=%s",
+			se->run_result == 0 ? "ok" : "failed");
 
 	rlog("service %p destroyed", se);
 	lsquic_engine_destroy(se->engine);
-	/* TODO check comments of this function */
-	lsquic_global_cleanup();
-
 	return NULL;
 }
 
@@ -681,10 +718,10 @@ struct lsquic_conn *service_connect_nop(struct connote *ce)
 	log("se %p ce %p", se, ce);
 
 	char sess[512] = { 0 };
-	session_resume_file_path(sess, ce->service->config.session_path,
-			(struct sockaddr_in*)&ce->sas,
+	if (session_resume_file_path(sess, sizeof(sess), ce->service->config.session_path,
+			(const struct sockaddr*)&ce->sas,
 			// lconn_ctx->ce->service->alpn,
-			ce->cc->if_name);
+			ce->cc->if_name) != 0) return NULL;
 
 	unsigned char *resume_info = NULL;
 	ssize_t resume_info_length =
@@ -701,6 +738,7 @@ struct lsquic_conn *service_connect_nop(struct connote *ce)
 			NULL, NULL, 0,
 			resume_info_length ? resume_info : NULL, resume_info_length, /* resume */
 			NULL, 0);
+	free(resume_info);
 	if (!lconn) {
 		eslog("lsquic_engine_connect()");
 		return NULL;
@@ -720,10 +758,10 @@ struct lsquic_conn *service_connect(struct connote *ce)
 	log("se %p ce %p", se, ce);
 
 	char sess[512] = { 0 };
-	session_resume_file_path(sess, ce->service->config.session_path,
-			(struct sockaddr_in*)&ce->sas,
+	if (session_resume_file_path(sess, sizeof(sess), ce->service->config.session_path,
+			(const struct sockaddr*)&ce->sas,
 			// lconn_ctx->ce->service->alpn,
-			ce->cc->if_name);
+			ce->cc->if_name) != 0) return NULL;
 
 	unsigned char *resume_info = NULL;
 	ssize_t resume_info_length =
@@ -740,6 +778,7 @@ struct lsquic_conn *service_connect(struct connote *ce)
 			NULL, NULL, 0,
 			resume_info_length ? resume_info : NULL, resume_info_length, /* resume */
 			NULL, 0);
+	free(resume_info);
 	if (!lconn) {
 		eslog("lsquic_engine_connect()");
 		return NULL;
@@ -775,9 +814,6 @@ void service_stream_ctx_free(struct lsquic_stream_ctx *sc)
 	}
 	sc->tx = NULL;
 
-	assert(!sc->n_rxq);
-	assert(!sc->n_txq);
-
 	free(sc);
 }
 
@@ -785,14 +821,32 @@ struct lsquic_stream_ctx *service_stream_ctx_malloc(struct co_config *cc,
 		ssize_t rx_len, ssize_t tx_len)
 {
 	struct lsquic_stream_ctx *sc = lstream_ctx_malloc();
+	if (!sc) {
+		return NULL;
+	}
 
 	INIT_LIST_HEAD(&sc->stream_node);
 	INIT_LIST_HEAD(&sc->rxq);
 	INIT_LIST_HEAD(&sc->txq);
+	if (!cc) {
+		free(sc);
+		errno = EINVAL;
+		return NULL;
+	}
 	sc->rx = skb_malloc(rx_len);
-	lstream_ctx_add_rxq(sc, sc->rx);
+	if (!sc->rx || !lstream_ctx_add_rxq(sc, sc->rx)) {
+		skb_free(sc->rx);
+		free(sc);
+		return NULL;
+	}
 	sc->tx = skb_malloc(tx_len);
-	lstream_ctx_add_txq(sc, sc->tx);
+	if (!sc->tx || !lstream_ctx_add_txq(sc, sc->tx)) {
+		skb_free(sc->tx);
+		lstream_ctx_del_rxq(sc, sc->rx);
+		skb_free(sc->rx);
+		free(sc);
+		return NULL;
+	}
 	sc->rx_func = cc->rx_func;
 	sc->tx_func = cc->tx_func;
 	/* FIXME */
@@ -852,7 +906,7 @@ ssize_t service_rx_func(struct lsquic_stream *stream, lsquic_stream_ctx_t *sc)
 		// -1 == n
 		// lsquic.h:
 		// ssize_t lsquic_stream_read (lsquic_stream_t *s, void *buf, size_t len);
-		if (EWOULDBLOCK == errno) {
+		if (ace_io_retryable(errno)) {
 			;
 		} else if (lsquic_stream_is_rejected(stream)) {
 			ylog("lsquic_stream_is_rejected(%p)", stream);
@@ -904,7 +958,12 @@ ssize_t service_tx_func(struct lsquic_stream *stream, lsquic_stream_ctx_t *sc)
 	}
 
 	/* write from data, this means data == head at the very beginning */
-	assert(tx->data == tx->head);
+	if (tx->data != tx->head || tx->offset > tx->len) {
+		errno = EPROTO;
+		lsquic_stream_wantwrite(stream, 0);
+		lsquic_conn_abort(lsquic_stream_conn(stream));
+		return -1;
+	}
 	ssize_t n = lsquic_stream_write(stream,
 			tx->data + tx->offset,
 			length);
@@ -912,9 +971,17 @@ ssize_t service_tx_func(struct lsquic_stream *stream, lsquic_stream_ctx_t *sc)
 		lsquic_stream_flush(stream);
 		tx->offset += n;
 		sc->tx_bytes += n;
-		assert(tx->offset <= tx->len);
+		if (tx->offset > tx->len) {
+			errno = EOVERFLOW;
+			lsquic_conn_abort(lsquic_stream_conn(stream));
+			return -1;
+		}
 		if (tx->offset == tx->len) {
 		}
+	} else if (ace_io_retryable(errno)) {
+		/* Preserve the current offset and let lsquic notify us when the
+		 * stream is writable again. */
+		lsquic_stream_wantwrite(stream, 1);
 	} else {
 		/*
 		   eslog("lsquic_stream_write(%p %p %ld), abort conn %p",
@@ -960,8 +1027,11 @@ int service_packets_out(void *packets_out_ctx,
 	do {
 		struct connote *ce = (struct connote*)out_spec[n].peer_ctx;
 		msg.msg_name = (void*)out_spec[n].dest_sa;
-		msg.msg_namelen = (AF_INET == out_spec[n].dest_sa->sa_family ?
-				sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6));
+		msg.msg_namelen = ace_sockaddr_len(out_spec[n].dest_sa);
+		if (msg.msg_namelen == 0) {
+			errno = EAFNOSUPPORT;
+			break;
+		}
 		msg.msg_iov = out_spec[n].iov;
 		msg.msg_iovlen = out_spec[n].iovlen;
 		msg.msg_flags = 0;
@@ -969,9 +1039,10 @@ int service_packets_out(void *packets_out_ctx,
 		// TODO LSQUIC_PREFERRED_ADDR
 		// TODO cmsg, ecn
 		// if server
-		if (sendmsg(ce->fd, &msg, MSG_ZEROCOPY) < 0) {
-			eslog("sendmsg(%d %lu)", ce->fd, msg.msg_iovlen);
-			ylog("TODO send unsent");
+		if (ace_udp_sendmsg(ce->fd, &msg, sendmsg) < 0) {
+			if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+				eslog("sendmsg(%d %lu)", ce->fd, msg.msg_iovlen);
+			}
 			break;
 		} else {
 			// log("sendmsg(%d #%lu)", ce->fd, n);
@@ -1019,8 +1090,7 @@ void service_packets_in(struct connote *ce)
 	memcpy(&local_sas, &ce->local_addr, sizeof(local_sas));
 	ecn = 0;
 
-	// TODO
-	// proc_ancillary(&msg, &local_sas, &ecn);
+	ace_parse_ancillary(&msg, &local_sas, &ecn);
 
 	int n = lsquic_engine_packet_in(
 			ce->service->engine, buf, nread,
@@ -1078,18 +1148,22 @@ ssize_t service_on_read(struct lsquic_stream *stream, lsquic_stream_ctx_t *sc)
 				lsquic_conn_abort(lsquic_stream_conn(stream));
 			} else {
 				elog("Unknown value returned by subtask");
-				exit(-EXIT_FAILURE);
+				lsquic_stream_close(stream);
+				lsquic_conn_abort(lsquic_stream_conn(stream));
+				return 0;
 			}
 		} else {
 			elog("Unknown value returned by subtask");
-			exit(-EXIT_FAILURE);
+			lsquic_stream_close(stream);
+			lsquic_conn_abort(lsquic_stream_conn(stream));
+			return 0;
 		}
 	} else if (!n) {
 		blog("stream %ld read 0 and shutdown 0", lsquic_stream_id(stream));
 		lsquic_stream_shutdown(stream, 0);
 	} else {
 		clog();
-		if (EWOULDBLOCK == errno) {
+		if (ace_io_retryable(errno)) {
 		} else {
 		}
 	}
@@ -1143,11 +1217,15 @@ ssize_t service_on_write(struct lsquic_stream *stream, lsquic_stream_ctx_t *sc)
 					lsquic_conn_abort(lsquic_stream_conn(stream));
 				} else {
 					elog("Unknown value returned by subtask");
-					exit(-EXIT_FAILURE);
+					lsquic_stream_close(stream);
+					lsquic_conn_abort(lsquic_stream_conn(stream));
+					return 0;
 				}
 			} else {
 				elog("Unknown value returned by subtask");
-				exit(-EXIT_FAILURE);
+				lsquic_stream_close(stream);
+				lsquic_conn_abort(lsquic_stream_conn(stream));
+				return 0;
 			}
 		}
 #if 0
@@ -1157,7 +1235,7 @@ ssize_t service_on_write(struct lsquic_stream *stream, lsquic_stream_ctx_t *sc)
 #endif
 	} else {
 		clog();
-		if (EWOULDBLOCK == errno) {
+		if (ace_io_retryable(errno)) {
 		} else {
 			eslog("lsquic_stream_write(%p %p), abort conn %p",
 					stream, sc->tx->data + sc->tx->offset,

@@ -53,6 +53,8 @@ int client_run_event(struct service *se);
 int client_run_service(struct client *ct, struct service *se);
 void client_recv_data(EV_P_ ev_io *w, int revents);
 int client_run(struct client *ct);
+int client_connect_once(struct service *se);
+void client_stop_event(struct service *se);
 
 lsquic_conn_ctx_t *client_on_new_conn(void *stream_if_ctx, struct lsquic_conn *conn);
 void client_on_goaway_received(lsquic_conn_t *stream_if_ctx);

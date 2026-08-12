@@ -82,6 +82,7 @@ struct config {
 	size_t in_limit;
 	char *keylog_path;
 	char *session_path;
+	int auto_connect;
 
 	/* endpoint */
 	size_t cpu;

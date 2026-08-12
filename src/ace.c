@@ -41,7 +41,7 @@ int main(int argc, const char *argv[])
 	// fork
 
 	if (argc != 2) {
-		exit(-EXIT_FAILURE);
+		return EXIT_FAILURE;
 	}
 
 	unsigned short int flags = atoi(argv[1]);
@@ -56,7 +56,7 @@ int main(int argc, const char *argv[])
 					struct config_manager *cm = config_init(NULL, flags, 1);
 					if (!cm) {
 						eslog();
-						exit(-EXIT_FAILURE);
+						return EXIT_FAILURE;
 					}
 
 					struct config *c = config_get_last(cm);
@@ -65,9 +65,14 @@ int main(int argc, const char *argv[])
 					// c->log_level = "debug";
 					c->retry = 3;
 					c->retry_timeout = 1000;
-					c->file = "/var/run/client";
+				c->file = "/var/run/client";
+				c->auto_connect = 1;
 
 					struct co_config *co = config_get_first_co(c);
+					if (getenv("ACE_IP_VERSION") && !strcmp(getenv("ACE_IP_VERSION"), "6")) {
+						strncpy(co->host, "::1", sizeof(co->host) - 1);
+						co->ipver = 6;
+					}
 					co->action |= ACTION_WANT_READ;
 					co->action |= ACTION_ONE_MORE << 16;
 					co->auto_stream0 = 1;
@@ -75,14 +80,16 @@ int main(int argc, const char *argv[])
 					size_t n = client_launch_service(ct, cm);
 					if (ct->n_service) {
 						log("%lu connote in %ld client launched", n, ct->n_service);
-						client_run(ct);
+						if (client_run(ct) != 0) {
+							return EXIT_FAILURE;
+						}
 						log();
 					} else {
 						elog("launched no service");
 					}
 				} else {
 					elog("created no service");
-					exit(-EXIT_FAILURE);
+					return EXIT_FAILURE;
 				}
 			}
 			break;
@@ -93,7 +100,7 @@ int main(int argc, const char *argv[])
 					struct config_manager *cm = config_init(NULL, flags, 1);
 					if (!cm) {
 						eslog();
-						exit(-EXIT_FAILURE);
+						return EXIT_FAILURE;
 					}
 
 					struct config *c = config_get_last(cm);
@@ -102,24 +109,30 @@ int main(int argc, const char *argv[])
 					// c->log_level = "debug";
 
 					struct co_config *co = config_get_first_co(c);
+					if (getenv("ACE_IP_VERSION") && !strcmp(getenv("ACE_IP_VERSION"), "6")) {
+						strncpy(co->host, "::", sizeof(co->host) - 1);
+						co->ipver = 6;
+					}
 					co->action |= ACTION_ONE_MORE << 16;
 
 					size_t n = server_launch_service(sr, cm);
 					if (sr->n_service) {
 						log("%lu connote in %ld service launched", n, sr->n_service);
-						server_run(sr);
+						if (server_run(sr) != 0) {
+							return EXIT_FAILURE;
+						}
 						log();
 					} else {
 						elog("launched no service");
 					}
 				} else {
 					elog("created no service");
-					exit(-EXIT_FAILURE);
+					return EXIT_FAILURE;
 				}
 			}
 			break;
 		default:
-			exit(-EXIT_FAILURE);
+			return EXIT_FAILURE;
 	}
 
 	return 0;

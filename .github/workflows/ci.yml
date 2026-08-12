@@ -1,0 +1,137 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: 2
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.compiler }} ${{ matrix.build_type }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        build_type: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang cmake curl git golang-go perl zlib1g-dev
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .deps
+            lib/x86_64
+          key: ace-deps-x86_64-${{ hashFiles('scripts/build-deps.sh') }}
+      - name: Build pinned dependencies
+        run: bash scripts/build-deps.sh
+      - name: Configure
+        env:
+          CC: ${{ matrix.compiler == 'gcc' && 'gcc' || 'clang' }}
+          CXX: ${{ matrix.compiler == 'gcc' && 'g++' || 'clang++' }}
+        run: cmake -S . -B build/ci -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+      - name: Build
+        run: cmake --build build/ci
+      - name: Unit and contract regressions
+        run: ctest --test-dir build/ci --output-on-failure
+
+  sanitizer:
+    name: ${{ matrix.sanitizer }} sanitizer
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, undefined]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake curl git golang-go perl zlib1g-dev
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .deps
+            lib/x86_64
+          key: ace-deps-x86_64-${{ hashFiles('scripts/build-deps.sh') }}
+      - name: Build pinned dependencies
+        run: bash scripts/build-deps.sh
+      - name: Configure
+        run: cmake -S . -B build/${{ matrix.sanitizer }} -DCMAKE_BUILD_TYPE=Debug -DACE_SANITIZER=${{ matrix.sanitizer }}
+      - name: Build
+        run: cmake --build build/${{ matrix.sanitizer }}
+      - name: Sanitizer regressions
+        env:
+          ASAN_OPTIONS: ${{ matrix.sanitizer == 'address' && 'detect_leaks=0' || '' }}
+        run: ctest --test-dir build/${{ matrix.sanitizer }} --output-on-failure
+
+  fuzz:
+    name: Protocol fuzz smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang cmake curl git golang-go perl zlib1g-dev
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .deps
+            lib/x86_64
+          key: ace-deps-x86_64-${{ hashFiles('scripts/build-deps.sh') }}
+      - name: Build pinned dependencies
+        run: bash scripts/build-deps.sh
+      - name: Configure and build fuzz target
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          cmake -S . -B build/fuzz -DCMAKE_BUILD_TYPE=Debug -DACE_BUILD_FUZZERS=ON
+          cmake --build build/fuzz --target fuzz_task_protocol
+      - name: Run bounded fuzz campaign
+        run: build/fuzz/tests/fuzz_task_protocol -runs=10000
+
+  quic-integration:
+    name: QUIC integration (${{ matrix.ip_version }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        ip_version: [4, 6]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build and runtime tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake curl git golang-go iproute2 openssl perl zlib1g-dev
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .deps
+            lib/x86_64
+          key: ace-deps-x86_64-${{ hashFiles('scripts/build-deps.sh') }}
+      - name: Build pinned dependencies
+        run: bash scripts/build-deps.sh
+      - name: Build ACE
+        run: |
+          cmake -S . -B build/ci -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build/ci
+      - name: Run real QUIC regression
+        env:
+          ACE_BUILD_DIR: build/ci
+          ACE_IP_VERSION: ${{ matrix.ip_version }}
+        run: bash scripts/smoke-test.sh

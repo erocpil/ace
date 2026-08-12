@@ -61,7 +61,7 @@ void connote_free(struct connote *ce)
 
 int connote_init_server(struct connote *ce)
 {
-	int fd = 0;
+	int fd = -1;
 	int saved_errno = 0;
 	socklen_t socklen = 0;
 	int s = 0;
@@ -74,7 +74,10 @@ int connote_init_server(struct connote *ce)
 	struct addrinfo *res = NULL;
 	char addr_str[0x20] = { 0 };
 
-	assert(-1 == ce->fd);
+	if (ce->fd != -1) {
+		errno = EALREADY;
+		return -1;
+	}
 
 	if (inet_pton(AF_INET, cc->host, &sa4->sin_addr)) {
 		sa4->sin_family = AF_INET;
@@ -229,14 +232,14 @@ int connote_init_server(struct connote *ce)
 			log("local address %s port %u", addr_str, ntohs(((struct sockaddr_in*)sa_local)->sin_port));
 			break;
 		case AF_INET6:
-			/* FIXME */
-			inet_ntop(AF_INET, &((struct sockaddr_in*)sa_local)->sin_addr, addr_str, sizeof(addr_str));
-			log("local address %s port %u", addr_str, ntohs(((struct sockaddr_in*)sa_local)->sin_port));
+			inet_ntop(AF_INET6, &((struct sockaddr_in6*)sa_local)->sin6_addr,
+					addr_str, sizeof(addr_str));
+			log("local address %s port %u", addr_str,
+					ntohs(((struct sockaddr_in6*)sa_local)->sin6_port));
 			break;
 		default:
-			elog();
-			exit(-1);
-			break;
+			errno = EAFNOSUPPORT;
+			goto ERROR;
 	}
 
 	ce->fd = fd;
@@ -247,7 +250,7 @@ ERROR:
 	if (res) {
 		freeaddrinfo(res);
 	}
-	if (fd > 0) {
+	if (fd >= 0) {
 		saved_errno = errno;
 		close(fd);
 		errno = saved_errno;
@@ -259,7 +262,7 @@ ERROR:
 
 int connote_init_client(struct connote *ce)
 {
-	int fd = 0;
+	int fd = -1;
 	socklen_t socklen = 0;
 	socklen_t peer_socklen = 0;
 	struct co_config *cc = ce->cc;
@@ -272,7 +275,10 @@ int connote_init_client(struct connote *ce)
 	int s = 0;
 	char addr_str[0x20] = { 0 };
 
-	assert(-1 == ce->fd);
+	if (ce->fd != -1) {
+		errno = EALREADY;
+		return -1;
+	}
 
 	union {
 		struct sockaddr_in sin;
@@ -437,16 +443,15 @@ int connote_init_client(struct connote *ce)
 			   );
 			break;
 		case AF_INET6:
-			// FIXME
 			log("local address %s port %u",
-					inet_ntop(AF_INET, &((struct sockaddr_in*)sa_local)->sin_addr, addr_str, sizeof(addr_str)),
-					ntohs(((struct sockaddr_in*)sa_local)->sin_port)
+					inet_ntop(AF_INET6, &((struct sockaddr_in6*)sa_local)->sin6_addr,
+						addr_str, sizeof(addr_str)),
+					ntohs(((struct sockaddr_in6*)sa_local)->sin6_port)
 			   );
 			break;
 		default:
-			elog();
-			exit(-1);
-			break;
+			errno = EAFNOSUPPORT;
+			goto ERROR;
 	}
 
 	ce->fd = fd;
@@ -457,7 +462,7 @@ ERROR:
 	if (res) {
 		freeaddrinfo(res);
 	}
-	if (fd > 0) {
+	if (fd >= 0) {
 		saved_errno = errno;
 		close(fd);
 		errno = saved_errno;

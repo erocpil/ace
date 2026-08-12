@@ -3,6 +3,7 @@
 #define __SK_BUFF_H__
 
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <sys/types.h>
 #include "list.h"
@@ -146,7 +147,7 @@ static inline void *skb_push(struct sk_buff *skb, unsigned int len)
  */
 static inline void *skb_pull(struct sk_buff *skb, unsigned int len)
 {
-	if (unlikely(len > skb->tail)) {
+	if (unlikely(len > skb->len)) {
 		return NULL;
 	}
 
@@ -173,9 +174,18 @@ static struct sk_buff *skb_malloc(ssize_t len)
 {
 	struct sk_buff *r = NULL;
 	size_t size = sizeof(struct sk_buff);
+	size_t payload_size;
+
+	if (len < -1) {
+		errno = EINVAL;
+		return NULL;
+	}
 
 	if (!len) {
 		r = malloc(size);
+		if (!r) {
+			return NULL;
+		}
 		memset(r, 0, sizeof(struct sk_buff));
 		INIT_LIST_HEAD(&r->skb_node);
 		return r;
@@ -184,13 +194,21 @@ static struct sk_buff *skb_malloc(ssize_t len)
 	if (-1 == len) {
 		len = DEFAULT_SKB_SIZE;
 	}
-	size += len;
+	payload_size = (size_t)len;
+	if (payload_size > UINT32_MAX || payload_size > SIZE_MAX - size) {
+		errno = EOVERFLOW;
+		return NULL;
+	}
+	size += payload_size;
 	r = (struct sk_buff*)malloc(size);
+	if (!r) {
+		return NULL;
+	}
+	memset(r, 0, sizeof(*r));
 	r->head = (unsigned char*)(r + 1);
 	r->data = r->head;
 	skb_reset_tail_pointer(r);
-	skb_set_end_offset(r, len);
-	memset(r, 0, offsetof(struct sk_buff, tail));
+	skb_set_end_offset(r, (unsigned int)payload_size);
 	INIT_LIST_HEAD(&r->skb_node);
 
 	return r;

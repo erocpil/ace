@@ -3,10 +3,15 @@
 #include "upstream.h"
 #include "task.h"
 
-inline void upstream_echo_add_rq(struct upstream_echo *echo, struct sk_buff *skb)
+inline int upstream_echo_add_rq(struct upstream_echo *echo, struct sk_buff *skb)
 {
+	if (!echo || !skb || !ace_quota_can_add(echo->n_rq, ACE_MAX_UPSTREAM_QUEUE)) {
+		errno = ENOBUFS;
+		return -1;
+	}
 	list_add_tail(&skb->skb_node, &echo->recv_queue);
 	echo->n_rq++;
+	return 0;
 }
 
 inline void upstream_echo_del_rq(struct upstream_echo *echo, struct sk_buff *skb)
@@ -15,16 +20,20 @@ inline void upstream_echo_del_rq(struct upstream_echo *echo, struct sk_buff *skb
 	echo->n_rq--;
 }
 
-static void upstream_echo_add_rq_external(struct upstream_echo *echo, struct sk_buff *skb)
+static int upstream_echo_add_rq_external(struct upstream_echo *echo, struct sk_buff *skb)
 {
-	list_add_tail(&skb->skb_node, &echo->recv_queue);
-	echo->n_rq++;
+	return upstream_echo_add_rq(echo, skb);
 }
 
-inline void upstream_echo_add_sq(struct upstream_echo *echo, struct sk_buff *skb)
+inline int upstream_echo_add_sq(struct upstream_echo *echo, struct sk_buff *skb)
 {
+	if (!echo || !skb || !ace_quota_can_add(echo->n_sq, ACE_MAX_UPSTREAM_QUEUE)) {
+		errno = ENOBUFS;
+		return -1;
+	}
 	list_add_tail(&skb->skb_node, &echo->send_queue);
 	echo->n_sq++;
+	return 0;
 }
 
 inline void upstream_echo_del_sq(struct upstream_echo *echo, struct sk_buff *skb)
@@ -33,10 +42,20 @@ inline void upstream_echo_del_sq(struct upstream_echo *echo, struct sk_buff *skb
 	echo->n_sq--;
 }
 
-static void upstream_echo_replace_skb(struct upstream_echo *echo)
+static int upstream_echo_replace_skb(struct upstream_echo *echo)
 {
-	upstream_echo_add_rq(echo, echo->rbuf);
-	echo->rbuf = skb_malloc(echo->rbuf->end);
+	struct sk_buff *replacement;
+	if (!echo || !echo->rbuf || !ace_quota_can_add(echo->n_rq, ACE_MAX_UPSTREAM_QUEUE)) {
+		errno = ENOBUFS;
+		return -1;
+	}
+	replacement = skb_malloc(echo->rbuf->end);
+	if (!replacement || upstream_echo_add_rq(echo, echo->rbuf) != 0) {
+		skb_free(replacement);
+		return -1;
+	}
+	echo->rbuf = replacement;
+	return 0;
 }
 
 static void upstream_add_echo(struct upstream *up, struct upstream_echo *echo)
@@ -66,7 +85,7 @@ int upstream_set_sockopt(int fd)
 
 	if (-1 == setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse))) {
 		eslog("setsockopt(%d SO_REUSEADDR)", fd);
-		exit(-EXIT_FAILURE);
+		return -1;
 	} else {
 		log("setsockopt(%d SO_REUSEADDR)", fd);
 	}
@@ -204,9 +223,17 @@ struct upstream_echo *upstream_echo_create(ssize_t len)
 {
 	struct upstream_echo *echo =
 		(struct upstream_echo*)malloc(sizeof(struct upstream_echo));
+	if (!echo) {
+		return NULL;
+	}
 	memset(echo, 0, sizeof(*echo));
+	echo->fd = -1;
 
 	echo->rbuf = skb_malloc(len);
+	if (!echo->rbuf) {
+		free(echo);
+		return NULL;
+	}
 	INIT_LIST_HEAD(&echo->echo_node);
 	INIT_LIST_HEAD(&echo->recv_queue);
 	INIT_LIST_HEAD(&echo->send_queue);
@@ -216,30 +243,31 @@ struct upstream_echo *upstream_echo_create(ssize_t len)
 
 static void upstream_echo_delete(struct upstream_echo *echo)
 {
-	clog("echo %p n_rq %u n_tq %u", echo, echo->n_rq, echo->n_sq);
 	if (!echo) {
 		return;
 	}
+	clog("echo %p n_rq %u n_tq %u", echo, echo->n_rq, echo->n_sq);
 
 	/* XXX */
 	/* 1. free rbuf */
-	if (echo->rbuf) {
-		// free(echo->rbuf);
-	}
+	skb_free(echo->rbuf);
+	echo->rbuf = NULL;
 
 	/* 2. free skb in skb_head */
 	struct sk_buff *pos = NULL;
 	struct sk_buff *n = NULL;
 	if (echo->n_rq) {
 		list_for_each_entry_safe(pos, n, &echo->recv_queue, skb_node) {
-			log();
+			upstream_echo_del_rq(echo, pos);
+			skb_free(pos);
 		}
 	}
 	pos = NULL;
 	n = NULL;
 	if (echo->n_sq) {
 		list_for_each_entry_safe(pos, n, &echo->send_queue, skb_node) {
-			log();
+			upstream_echo_del_sq(echo, pos);
+			skb_free(pos);
 		}
 	}
 
@@ -275,7 +303,6 @@ static inline int upstream_call_rx_process_func(struct upstream_echo *echo)
 	if (n == (int)echo->n_rq) {
 		/* all skbs are processed */
 		glog("n %d n_rq %u", n, echo->n_rq);
-		assert(0 == echo->n_rq);
 	} else if (n > 0) {
 		glog("%d skb not processed", n);
 		echo->n_rq -= n;
@@ -290,7 +317,9 @@ static void upstream_write_char(struct ev_loop *loop, struct ev_io *watcher, int
 static inline int upstream_call_tx_process_func(struct upstream_echo *echo, struct sk_buff *skb)
 {
 	ylog();
-	upstream_echo_add_sq(echo, skb);
+	if (upstream_echo_add_sq(echo, skb) != 0) {
+		return -1;
+	}
 	/* TODO FIXME XXX */
 	/* still here is some work to do about closed fd and inactive wather */
 	/* if fd was closed before client know it */
@@ -330,6 +359,10 @@ static void upstream_accept(struct ev_loop *loop,
 	upstream_set_sockopt(sock);
 
 	struct upstream_echo *echo = upstream_echo_create(-1);
+	if (!echo) {
+		close(sock);
+		return;
+	}
 	// skb_reserve(echo->skb, sizeof(struct upstream_skb_head));
 
 	log("echo %p sock %d", echo, sock);
@@ -527,7 +560,10 @@ static void upstream_read(struct ev_loop *loop, struct ev_io *watcher, int reven
 	int fd = watcher->fd;
 	struct upstream_echo *echo = (struct upstream_echo*)watcher->data;
 
-	assert(fd == echo->fd);
+	if (fd != echo->fd) {
+		errno = EBADF;
+		goto ERROR;
+	}
 	int n = upstream_read_skb(echo);
 
 	switch (n) {
@@ -541,7 +577,9 @@ static void upstream_read(struct ev_loop *loop, struct ev_io *watcher, int reven
 				break;
 			}
 			/* 2. pend this skb and malloc a new one */
-			upstream_echo_replace_skb(echo);
+				if (upstream_echo_replace_skb(echo) != 0) {
+					goto ERROR;
+				}
 			/* 3. check if recv()ed enough skb */
 			if (echo->n_rq < echo->up->n_skb_batch) {
 				break;
@@ -639,9 +677,14 @@ struct upstream* upstream_init(struct ev_loop *loop, uint32_t n_skb_batch,
 		errno = EINVAL;
 		return NULL;
 	}
-	struct upstream *up = (struct upstream*)malloc(sizeof(struct upstream));
-
-	memset(up, 0, offsetof(struct upstream, loop));
+	struct upstream *up = calloc(1, sizeof(struct upstream));
+	if (!up) {
+		return NULL;
+	}
+	up->fd = -1;
+	up->loop = loop;
+	up->file = file;
+	INIT_LIST_HEAD(&up->echo_head);
 	if (upstream_create_socket(up) < 0) {
 		upstream_free(up);
 		return NULL;
@@ -649,8 +692,6 @@ struct upstream* upstream_init(struct ev_loop *loop, uint32_t n_skb_batch,
 	up->n_skb_batch = n_skb_batch > 0 ? n_skb_batch : 1;
 	up->retry = retry;
 	up->retry_timeout = retry_timeout;
-	up->file = file;
-	up->loop = loop;
 	if (rx_process_func) {
 		up->rx_process_func = rx_process_func;
 	} else {
@@ -663,19 +704,35 @@ struct upstream* upstream_init(struct ev_loop *loop, uint32_t n_skb_batch,
 		up->tx_process_func = upstream_call_tx_process_func;
 	}
 	up->mode = mode;
-	INIT_LIST_HEAD(&up->echo_head);
-
 	return up;
 }
 
 void upstream_free(struct upstream *up)
 {
-	if (up) {
-		free(up);
+	if (!up) {
+		return;
 	}
-
-	// TODO FIXME XXX
-	upstream_del_echo(up, NULL);
+	struct upstream_echo *echo = NULL;
+	struct upstream_echo *next = NULL;
+	list_for_each_entry_safe(echo, next, &up->echo_head, echo_node) {
+		if (up->loop) {
+			ev_io_stop(up->loop, &echo->w);
+		}
+		upstream_del_echo(up, echo);
+		if (echo->fd >= 0) {
+			close(echo->fd);
+			echo->fd = -1;
+		}
+		upstream_echo_delete(echo);
+	}
+	if (up->loop) {
+		ev_io_stop(up->loop, &up->w);
+	}
+	if (up->fd >= 0) {
+		close(up->fd);
+		up->fd = -1;
+	}
+	free(up);
 }
 
 static void upstream_read_char(struct ev_loop *loop, struct ev_io *watcher, int revents)
@@ -744,8 +801,15 @@ static void upstream_read_char(struct ev_loop *loop, struct ev_io *watcher, int 
 					head->serial = atoi(p3);
 					rlog("serial %u", head->serial);
 					memcpy(skb->data, p4, len);
+					if (!skb_push(skb, sizeof(*head))) {
+						skb_free(skb);
+						goto ERROR;
+					}
 					log("%p %u %u %u", head, head->length, head->theme, head->serial);
-					upstream_echo_add_rq_external(echo, skb);
+						if (upstream_echo_add_rq_external(echo, skb) != 0) {
+							skb_free(skb);
+							goto ERROR;
+						}
 					/* TODO register write event to echo back */
 					// ev_io_modify(watcher, EV_WRITE);
 					if (upstream_call_rx_process_func(echo) < 0) {

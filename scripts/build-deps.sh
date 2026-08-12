@@ -30,7 +30,7 @@ esac
 LIB_DIR="$PROJECT_DIR/lib/$ARCH_DIR"
 
 # ---- mirror selection ----
-MIRROR="${MIRROR:-gitee}"
+MIRROR="${MIRROR:-github}"
 case "$MIRROR" in
     gitee)
         BORINGSSL_URL="https://gitee.com/mirrors/boringssl.git"
@@ -59,24 +59,20 @@ BORINGSSL_DIR="$DEPS_DIR/boringssl"
 if [ ! -d "$BORINGSSL_DIR/.git" ]; then
     rm -rf "$BORINGSSL_DIR"
     log "Cloning BoringSSL (shallow)..."
-    GIT_SSL_NO_VERIFY=1 git clone --depth 1 "$BORINGSSL_URL" "$BORINGSSL_DIR"
+    git clone --depth 1 "$BORINGSSL_URL" "$BORINGSSL_DIR"
 fi
 
 cd "$BORINGSSL_DIR"
-log "Finding BoringSSL commit with BORINGSSL_API_VERSION 18..."
-BSSL_COMMIT=$(git log --format='%H' --diff-filter=M -1 \
-    -S 'BORINGSSL_API_VERSION 18' -- include/openssl/base.h 2>/dev/null || true)
-
-if [ -z "$BSSL_COMMIT" ]; then
-    log "API v18 not in shallow clone, deepening history..."
-    git fetch --deepen=3000 2>/dev/null || true
-    BSSL_COMMIT=$(git log --format='%H' --diff-filter=M -1 \
-        -S 'BORINGSSL_API_VERSION 18' -- include/openssl/base.h)
+BSSL_COMMIT="955ef7991e41ac6c0ea5114b4b9abb98cc5fd614"
+log "Using pinned BoringSSL API v18 commit ${BSSL_COMMIT:0:12}..."
+if ! git cat-file -e "${BSSL_COMMIT}^{commit}" 2>/dev/null; then
+    git fetch --deepen=3000 origin main
 fi
-[ -n "$BSSL_COMMIT" ] || die "Cannot find BoringSSL commit with API v18"
+git cat-file -e "${BSSL_COMMIT}^{commit}" 2>/dev/null \
+    || die "Cannot fetch pinned BoringSSL commit $BSSL_COMMIT"
 
-log "→ commit ${BSSL_COMMIT:0:12} (parent of v18→v19 bump)"
-git -c advice.detachedHead=false checkout "${BSSL_COMMIT}^"
+log "→ commit ${BSSL_COMMIT:0:12}"
+git -c advice.detachedHead=false checkout "${BSSL_COMMIT}"
 grep -q 'BORINGSSL_API_VERSION 18' include/openssl/base.h \
     || die "Checked out commit does not have API version 18"
 
@@ -85,6 +81,7 @@ mkdir -p "$BSSL_BUILD" && cd "$BSSL_BUILD"
 log "Configuring BoringSSL..."
 cmake -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DBUILD_SHARED_LIBS=OFF \
+    -DCMAKE_C_FLAGS=-Wno-error=stringop-overflow \
     .. 2>&1 | tail -1
 
 log "Building BoringSSL (-j$NPROC)..."
@@ -98,15 +95,22 @@ ok "BoringSSL → libssl.a + libcrypto.a"
 # 2. libev v4.33
 # ===========================================================================
 LIBEV_VER="4.33"
+LIBEV_SHA256="507eb7b8d1015fbec5b935f34ebed15bf346bed04a11ab82b8eee848c4205aea"
 LIBEV_DIR="$DEPS_DIR/libev-$LIBEV_VER"
 if [ ! -d "$LIBEV_DIR" ]; then
     log "Downloading libev v$LIBEV_VER..."
-    curl -fsSL --retry 2 "http://dist.schmorp.de/libev/libev-${LIBEV_VER}.tar.gz" \
+    curl -fsSL --retry 2 "https://dist.schmorp.de/libev/libev-${LIBEV_VER}.tar.gz" \
         -o "$DEPS_DIR/libev.tar.gz" \
         || curl -fsSL --retry 2 "https://fossies.org/linux/misc/libev-${LIBEV_VER}.tar.gz" \
         -o "$DEPS_DIR/libev.tar.gz" \
         || die "Cannot download libev tarball"
+    printf '%s  %s\n' "$LIBEV_SHA256" "$DEPS_DIR/libev.tar.gz" | sha256sum -c - \
+        || die "libev tarball checksum mismatch"
     tar xzf "$DEPS_DIR/libev.tar.gz" -C "$DEPS_DIR"
+fi
+if [ -f "$DEPS_DIR/libev.tar.gz" ]; then
+    printf '%s  %s\n' "$LIBEV_SHA256" "$DEPS_DIR/libev.tar.gz" | sha256sum -c - \
+        || die "cached libev tarball checksum mismatch"
 fi
 
 cd "$LIBEV_DIR"
@@ -121,10 +125,24 @@ ok "libev → libev.a"
 # 3. lsquic v3.3.1
 # ===========================================================================
 LSQUIC_DIR="$DEPS_DIR/lsquic"
+LSQUIC_COMMIT="b373fe522048a6885b0cdeebfa583a61dee2ff1f"
 if [ ! -d "$LSQUIC_DIR/.git" ]; then
     rm -rf "$LSQUIC_DIR"
     log "Cloning lsquic v3.3.1..."
-    GIT_SSL_NO_VERIFY=1 git clone --branch v3.3.1 --depth 1 "$LSQUIC_URL" "$LSQUIC_DIR"
+    git clone --branch v3.3.1 --depth 1 "$LSQUIC_URL" "$LSQUIC_DIR"
+fi
+
+git -C "$LSQUIC_DIR" cat-file -e "${LSQUIC_COMMIT}^{commit}" 2>/dev/null \
+    || die "Cannot find pinned lsquic commit $LSQUIC_COMMIT"
+git -C "$LSQUIC_DIR" -c advice.detachedHead=false checkout "$LSQUIC_COMMIT"
+[ "$(git -C "$LSQUIC_DIR" rev-parse HEAD)" = "$LSQUIC_COMMIT" ] \
+    || die "lsquic checkout does not match pinned commit"
+
+if ! git -C "$LSQUIC_DIR" submodule status --recursive | grep -q '^-' ; then
+    :
+else
+    log "Initializing lsquic submodules..."
+    git -C "$LSQUIC_DIR" submodule update --init --recursive
 fi
 
 LSQUIC_BUILD="$LSQUIC_DIR/build"

@@ -15,6 +15,7 @@
 #include "hash.h"
 #include "sk_buff.h"
 #include "define.h"
+#include "resource_limits.h"
 
 struct upstream;
 
@@ -90,9 +91,9 @@ struct upstream_echo *upstream_echo_create(ssize_t len);
 int upstream_socket_create(char *ipaddr, unsigned short int port);
 int upstream_socket_connect(char *ipaddr, unsigned short int port);
 int upstream_set_sockopt(int fd);
-void upstream_echo_add_rq(struct upstream_echo *echo, struct sk_buff *skb);
+int upstream_echo_add_rq(struct upstream_echo *echo, struct sk_buff *skb);
 void upstream_echo_del_rq(struct upstream_echo *echo, struct sk_buff *skb);
-void upstream_echo_add_sq(struct upstream_echo *echo, struct sk_buff *skb);
+int upstream_echo_add_sq(struct upstream_echo *echo, struct sk_buff *skb);
 void upstream_echo_del_sq(struct upstream_echo *echo, struct sk_buff *skb);
 
 #endif

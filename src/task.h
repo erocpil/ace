@@ -5,6 +5,7 @@
 #include <libgen.h>
 #include "sk_buff.h"
 #include "service.h"
+#include "task_protocol.h"
 
 // #define SENDFILE_BLOCK_SIZE ((unsigned int)-1)
 #define SENDFILE_BLOCK_SIZE ((unsigned short int)-1)
@@ -22,21 +23,6 @@ enum {
 	TASK_EXIT,
 };
 
-struct upstream_skb_head {
-	/* payload size */
-	unsigned int length;
-	/* app topic */
-	unsigned short int theme;
-	/* operation code */
-	unsigned short int serial;
-};
-
-enum {
-	TASK_THEME_SENDFILE = 0,
-	TASK_THEME_PERF,
-	TASK_THEME_MAX,
-};
-
 struct task_type {
 	char *cmd;
 	char *command;
@@ -46,10 +32,11 @@ struct task_type {
 static struct task_type task_type[] = {
 	{ "sf", "sendfile", 0, },
 	{ "perf", "performance", 1, },
+	{ "probe", "probe", 2, },
 	{ "", "", -1, },
 };
 
-#define TASK_TYPE_SIZE (sizeof(task_type) - 1)
+#define TASK_TYPE_SIZE (sizeof(task_type) / sizeof(task_type[0]) - 1)
 
 #define upstream_skb_head_dump(h) \
 	do { \
@@ -89,7 +76,7 @@ enum {
 	TASK_TYPE_MAX,
 };
 
-static int task_type_num = (sizeof(task_type) / sizeof(struct task_type));
+static int task_type_num = TASK_TYPE_SIZE;
 
 /* conn's task */
 struct task {
@@ -128,21 +115,6 @@ struct sendfile_subtask {
 	size_t offset;
 };
 
-struct sendfile_nego {
-	/* reserved code */
-	unsigned short int code;
-	/* /usr/include/linux/limits.h:
-	 * NAME_MAX         255
-	 * PATH_MAX        4096
-	 */
-	unsigned short int path_len;
-	unsigned short int file_len;
-	/* 65535 */
-	unsigned short int type_len;
-	size_t length;
-	char head[0];
-} __attribute__((aligned(sizeof(char*))));
-
 struct sendfile_task {
 	/* thie element must be the first */
 	struct task task;
@@ -151,6 +123,7 @@ struct sendfile_task {
 	char *path;
 	char *file;
 	char *type;
+	char *source_path;
 	void *data;
 	size_t length;
 	size_t offset;
@@ -166,11 +139,6 @@ struct perf_subtask{
 	size_t length;
 	size_t offset;
 };
-
-struct perf_nego {
-	unsigned short int code;
-	unsigned short int dual;
-} __attribute__((aligned(sizeof(char))));
 
 struct perf_task {
 	/* thie element must be the first */

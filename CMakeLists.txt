@@ -1,6 +1,20 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.16)
 
 project(ace)
+
+set(ACE_SANITIZER "" CACHE STRING "Enable address, undefined, or leak sanitizer")
+set_property(CACHE ACE_SANITIZER PROPERTY STRINGS "" address undefined leak)
+option(ACE_BUILD_FUZZERS "Build libFuzzer protocol targets (Clang only)" OFF)
+
+if(ACE_SANITIZER)
+	if(NOT ACE_SANITIZER MATCHES "^(address|undefined|leak)$")
+		message(FATAL_ERROR "Unsupported ACE_SANITIZER=${ACE_SANITIZER}")
+	endif()
+	add_compile_options(-fsanitize=${ACE_SANITIZER} -fno-omit-frame-pointer)
+	add_link_options(-fsanitize=${ACE_SANITIZER})
+endif()
+
+include(CTest)
 
 add_definitions(-g -O0 -Wall -Wextra -fno-omit-frame-pointer -Wno-comment)
 # add_definitions(-O1 -Wall -Wextra -fno-omit-frame-pointer -Wno-comment)
@@ -44,3 +58,7 @@ CheckCpuFreq()
 # add_compile_definitions(MHz=100.001)
 
 add_subdirectory(src)
+
+if (BUILD_TESTING)
+	add_subdirectory(tests)
+endif()

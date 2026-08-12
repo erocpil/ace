@@ -16,6 +16,8 @@ void ace_runner_init_signal(struct ev_loop *loop,
 void ace_runner_add_service(struct list_head *head, size_t *n_service,
 		struct service *se);
 int ace_runner_run_service(size_t *n_running, struct service *se);
+void ace_runner_stop_services(struct list_head *head);
+int ace_runner_join_services(struct list_head *head, size_t *n_running);
 int ace_runner_run(struct ev_loop *loop, ev_timer *tw,
 		size_t n_service, void *data,
 		void (*timeout_func)(EV_P_ ev_timer*, int));

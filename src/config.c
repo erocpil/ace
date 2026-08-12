@@ -61,7 +61,7 @@ struct config_manager *config_init(
 		c->session_path = NULL;
 	} else {
 		c->keylog_path = "../ckeylog/";
-		c->session_path = "../session/";
+		c->session_path = "session";
 	}
 
 	for (unsigned int i = 0; i < n; i++) {
