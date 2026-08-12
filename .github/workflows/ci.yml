@@ -117,7 +117,7 @@ jobs:
       - name: Install build and runtime tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake curl git golang-go iproute2 liblzma-dev libmagic-dev openssl perl zlib1g-dev
+          sudo apt-get install -y build-essential cmake curl git golang-go iproute2 liblzma-dev libmagic-dev openssl perl socat zlib1g-dev
       - uses: actions/cache@v5
         with:
           path: |
