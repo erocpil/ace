@@ -90,9 +90,9 @@ static inline void task_exit(struct task *task)
 	task->end = rdtsc();
 
 	unsigned long c = task->end - task->start;
-	hplog("task %p sub %u done %lu start %lu end %lu cycle %lu %fms",
-			task, task->n_sub, task->n_sub_done,
-			task->start, task->end, c, c / 1000/ MHz);
+	hplog("task %p sub %u done %lu start %lu end %lu cycle %lu",
+		task, task->n_sub, task->n_sub_done,
+		task->start, task->end, c);
 }
 
 ssize_t sendfile_ctrl_rx(struct lsquic_stream_ctx *sc)

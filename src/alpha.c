@@ -190,8 +190,6 @@ void *looper_func(void *arg)
 		}
 	}
 	clog("pthread_cleanup_pop(0)");
-	sleep(-1);
-	clog("sleep(-1) returned");
 	pthread_cleanup_pop(0);
 	clog("return");
 	return NULL;

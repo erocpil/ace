@@ -172,9 +172,17 @@ int config_check(struct config *ch)
 	}
 
 	if (flags & LSENG_SERVER) {
-		/* TODO check server config */
+		/* server must bind to a port */
+		if (!ch->n_co_config) {
+			elog("server config has no co_config entries");
+			return -1;
+		}
 	} else {
-		/* TODO check client config */
+		/* client needs upstream control path */
+		if (!ch->file) {
+			elog("client config missing upstream file path");
+			return -1;
+		}
 	}
 
 	return 0;

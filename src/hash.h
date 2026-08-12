@@ -480,7 +480,7 @@ static int ace_hash_del(struct ace_hash *h, char *k, unsigned int kl, char **v, 
 	struct ace_hash_elem *elem = NULL;
 	hlist_for_each_entry(elem, hh, hl_node) {
 		if (c == elem->sig && kl == elem->klen) {
-			if (memcmp(k, elem->key, kl)) {
+			if (0 == memcmp(k, elem->key, kl)) {
 				hlist_del(&elem->hl_node);
 				*v = elem->val;
 				*vl = elem->vlen;

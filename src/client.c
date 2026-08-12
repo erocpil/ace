@@ -1,56 +1,7 @@
 #include "client.h"
 #include "task.h"
 #include "link.h"
-
-static void client_exit(struct ev_loop *loop, ev_signal *s, int revents)
-{
-	if (EV_ERROR & revents) {
-		elog("invalid event");
-	}
-
-	struct client *ct = (struct client*)s->data;
-	struct service *se = NULL;
-	list_for_each_entry(se, &ct->service_head, service_node) {
-		ylog("exit se %p %lu conn", se, se->n_client_conn);
-		struct lsquic_conn_ctx *lconn_ctx = NULL;
-		list_for_each_entry(lconn_ctx, &se->conn_head, conn_node) {
-			lsquic_conn_close(lconn_ctx->lconn);
-		}
-	}
-}
-
-static void client_signal_quit(struct ev_loop *loop, ev_signal *s, int revents)
-{
-	ylog("Signal QUIT captured");
-	client_exit(loop, s, revents);
-}
-
-static void client_signal_int(struct ev_loop *loop, ev_signal *s, int revents)
-{
-	ylog("Signal INT captured");
-	client_exit(loop, s, revents);
-	exit(-EXIT_FAILURE);
-}
-
-static void client_signal_term(struct ev_loop *loop, ev_signal *s, int revents)
-{
-	ylog("Signal TERM captured");
-	client_exit(loop, s, revents);
-	exit(-EXIT_FAILURE);
-}
-
-static void client_init_signal(struct client *ct)
-{
-	ct->signal_quit.data = (void*)ct;
-	ct->signal_int.data = (void*)ct;
-	ct->signal_term.data = (void*)ct;
-	ev_signal_init(&ct->signal_quit, client_signal_quit, SIGQUIT);
-	ev_signal_init(&ct->signal_int, client_signal_int, SIGINT);
-	ev_signal_init(&ct->signal_term, client_signal_term, SIGTERM);
-	ev_signal_start(ct->loop, &ct->signal_quit);
-	ev_signal_start(ct->loop, &ct->signal_int);
-	ev_signal_start(ct->loop, &ct->signal_term);
-}
+#include "runner.h"
 
 struct client *client_init()
 {
@@ -63,7 +14,9 @@ struct client *client_init()
 	/* client's default event loop */
 	ct->loop = EV_DEFAULT;
 
-	client_init_signal(ct);
+	ace_runner_init_signal(ct->loop,
+			&ct->signal_quit, &ct->signal_int, &ct->signal_term,
+			(void*)ct);
 
 	return ct;
 }
@@ -77,7 +30,8 @@ int client_launch_service(struct client *ct, struct config_manager *cm)
 
 	list_for_each_entry(pos, &cm->config_head, config_node) {
 		if (-1 == config_check(pos)) {
-			exit(-EXIT_FAILURE);
+			elog("config_check failed, skipping");
+			continue;
 		}
 	}
 
@@ -86,31 +40,10 @@ int client_launch_service(struct client *ct, struct config_manager *cm)
 		if (!se) {
 			continue;
 		}
-#if 0
-		struct co_config *co_pos = NULL;
-		list_for_each_entry(co_pos, &pos->co_config_head, co_config_node) {
-			struct connote *ce = connote_init(co_pos);
-			if (!ce) {
-				exit(-EXIT_FAILURE);
-				// TODO free ce and go on
-				continue;
-			}
-			struct client_event *ev = (struct client_event*)malloc(sizeof(struct client_event));
-			if (!ev) {
-				// TODO
-				exit(-EXIT_FAILURE);
-				return -1;
-			}
-			ce->event = (void*)ev;
-			service_add_connote(se, ce);
-			n_connote++;
-		}
-#endif
 		struct client_event_loop *evl = (struct client_event_loop*)malloc(sizeof(struct client_event_loop));
 		if (!evl) {
-			// TODO
-			exit(-EXIT_FAILURE);
-			return -1;
+			elog("malloc client_event_loop failed, skipping");
+			continue;
 		}
 		// rlog("evl %p", evl);
 		memset(evl, 0, sizeof(*evl));
@@ -126,73 +59,28 @@ int client_launch_service(struct client *ct, struct config_manager *cm)
 
 void client_add_service(struct client *sr, struct service *se)
 {
-	struct list_head *head = &sr->service_head;
-	struct list_head *node = &se->service_node;
-	list_add_tail(head, node);
-	sr->n_service++;
+	ace_runner_add_service(&sr->service_head, &sr->n_service, se);
 }
 
-static void client_timeout_func(EV_P_ ev_timer *w, int revents)
+static void client_timeout_cb(EV_P_ ev_timer *w, int revents)
 {
-#if 0
-	/* TEST */
-	struct server *sr = (struct server*)w->data;
-	struct service *pos = NULL;
-	struct list_head *head = &sr->service_head;
-	list_for_each_entry(pos, head, service_node) {
-		struct server_event_loop *evl = (struct server_event_loop*)pos->loop;
-		if (!ev_async_pending(&evl->async_w)) {
-			log();
-			ev_async_send(evl->loop, &evl->async_w);
-		}
-	}
-#endif
-	w->repeat = 1.;
-	ev_timer_again(loop, w);
+	client_process_service(w->data);
 }
 
 /* client_run - run each service */
 int client_run(struct client *ct)
 {
-	if (!ct || !ct->n_service) {
-		elog();
-		return -1;
-	}
 	struct service *pos = NULL;
-	struct list_head *head = &ct->service_head;
-	list_for_each_entry(pos, head, service_node) {
-		client_run_service(ct, pos);
+	list_for_each_entry(pos, &ct->service_head, service_node) {
+		ace_runner_run_service(&ct->n_running_service, pos);
 	}
 
-	if (ct->n_service > 0) {
-		log();
-		ev_timer_init(&ct->tw, client_timeout_func, 1., 0.);
-		ev_timer_start(ct->loop, &ct->tw);
-		ev_run(ct->loop, 0);
-		glog();
-		glog();
-	}
-	log();
-
-	return 0;
+	return ace_runner_run(ct->loop, &ct->tw,
+			ct->n_service, (void*)ct,
+			client_timeout_cb);
 }
 
-/* client_run_service - run on service */
-int client_run_service(struct client *ct, struct service *se)
-{
-	int s = 0;
-	pthread_t thread;
-
-	s = pthread_create(&thread, NULL, service_func, (void*)se);
-	if (-1 == s) {
-		eslog("pthread_create()");
-		/// TODO free se
-	} else {
-		ct->n_running_service++;
-	}
-
-	return s;
-}
+#define client_recv_data ace_runner_recv_data
 
 static inline void client_timer_expired(EV_P_ ev_timer *timer, int revents)
 {
@@ -214,7 +102,6 @@ static void client_async_w_cb(EV_P_ ev_async *w, int revents)
 	}
 	if (i == 3) {
 		rlog();
-		// service_set_stopped(se);
 	}
 }
 
@@ -243,8 +130,7 @@ static int client_process_upstream_read(struct upstream_echo *echo)
 		}
 		struct client_event *ev = (struct client_event*)malloc(sizeof(struct client_event));
 		if (!ev) {
-			// TODO
-			exit(-EXIT_FAILURE);
+			eslog("malloc client_event failed");
 			return -1;
 		}
 		ce->event = (void*)ev;
@@ -255,9 +141,8 @@ static int client_process_upstream_read(struct upstream_echo *echo)
 		/* 2. connect the new ce */
 		if (co->bindtodevice) {
 			if (link_get_status(co->if_name) < 0) {
-				/* TODO */
-				rlog("device %s down", co->if_name);
-				exit(-EXIT_FAILURE);
+				rlog("device %s down, skipping", co->if_name);
+				return -1;
 			}
 		} else {
 			ylog("no bindtodevice");
@@ -326,8 +211,9 @@ static int client_process_upstream_read(struct upstream_echo *echo)
 		}
 
 		if (-1 == task->init(task)) {
-			elog("TODO task->init()");
-			exit(-EXIT_FAILURE);
+			elog("task->init() failed, skipping");
+			skb_free(skb);
+			continue;
 		}
 
 		/* now that task was initialized, send info to server */
@@ -342,8 +228,9 @@ static int client_process_upstream_read(struct upstream_echo *echo)
 		sc->tx->offset = 0;
 		/* prepare negotiation info */
 		if (-1 == task->nego(task, sc->tx)) {
-			elog("TODO task->nego()");
-			exit(-EXIT_FAILURE);
+			elog("task->nego() failed, skipping");
+			skb_free(skb);
+			continue;
 		}
 
 		/* push data to head to send the whole buffer */
@@ -378,11 +265,6 @@ static int client_process_upstream_write(struct upstream_echo *echo, struct sk_b
 		echo->up->tx_process_func;
 	int n = tx_process_func(echo, skb);
 	return n;
-}
-
-void client_recv_data(EV_P_ ev_io *w, int revents)
-{
-	service_packets_in(w->data);
 }
 
 /* !!!run in service thread or process!!! */
@@ -428,13 +310,14 @@ int client_run_event(struct service *se)
 	if (!evl->up) {
 		eslog("upstream_init()");
 		upstream_free(evl->up);
-		exit(-EXIT_FAILURE);
+		return -1;
 	}
 	evl->up->entity = (void*)se;
 
 	/* run */
 	if (0 != upstream_listen(evl->up)) {
-		exit(-EXIT_FAILURE);
+		elog("upstream_listen() failed");
+		return -1;
 	}
 
 	ev_async_start(evl->loop, &evl->async_w);
@@ -500,11 +383,10 @@ void client_on_conn_closed(lsquic_conn_t *conn)
 
 	/* notify upstream */
 	if (!skb) {
-		// skb = skb_malloc(sizeof(struct upstream_skb_head));
 		skb = skb_malloc(-1);
 		if (!skb) {
-			eslog("skb_malloc(sizeof(struct upstream_skb_head))");
-			exit(-EXIT_FAILURE);
+			eslog("skb_malloc() in on_conn_closed");
+			return;
 		} else {
 			ylog("make default skb");
 			struct upstream_skb_head *head = (struct upstream_skb_head*)skb->head;
@@ -647,8 +529,8 @@ void client_on_hsk_done(lsquic_conn_t *conn, enum lsquic_hsk_status status)
 				/* notify upstream */
 				skb = skb_malloc(-1);
 				if (!skb) {
-					eslog("skb_malloc(sizeof(struct upstream_skb_head))");
-					exit(-EXIT_FAILURE);
+					eslog("skb_malloc() in on_hsk_done");
+					return;
 				} else {
 					ylog("notify upstream");
 					struct upstream_skb_head *head = (struct upstream_skb_head*)skb->head;
@@ -682,8 +564,8 @@ void client_on_hsk_done(lsquic_conn_t *conn, enum lsquic_hsk_status status)
 				/* notify upstream */
 				skb = skb_malloc(-1);
 				if (!skb) {
-					eslog("skb_malloc(sizeof(struct upstream_skb_head))");
-					exit(-EXIT_FAILURE);
+					eslog("skb_malloc() in on_new_stream");
+					return;
 				} else {
 					ylog("notify upstream");
 					struct upstream_skb_head *head = (struct upstream_skb_head*)skb->head;

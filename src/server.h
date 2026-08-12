@@ -18,6 +18,8 @@ struct server {
 	/* mutithreading or multiprocessing */
 	unsigned long task_flags;
 
+	volatile int quit;
+
 	ev_signal signal_quit;
 	ev_signal signal_int;
 	ev_signal signal_term;

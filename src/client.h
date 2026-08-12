@@ -18,6 +18,8 @@ struct client {
 	size_t n_service;
 	size_t n_running_service;
 
+	volatile int quit;
+
 	struct lsquic_stream_if *stream_if;
 	lsquic_packets_out_f packets_out;
 

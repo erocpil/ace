@@ -52,9 +52,6 @@ struct co_config {
 		unsigned short int auto_stream1;
 	};
 
-	/* the least significant 2 bits are flags,
-	 * others are a pointer to a connote
-	 */
 	unsigned long flags;
 	int ipver;
 	unsigned short port;
@@ -68,11 +65,10 @@ struct config {
 	struct list_head config_node;
 	struct list_head co_config_head;
 	size_t n_co_config;
-	/* the least significant 2 bits are flags,
-	 * others are a pointer to a server or client
-	 */
 	unsigned long flags;
 	/* TODO size and mask */
+
+	void *owner;
 
 	/* cert hash */
 	size_t n_cert_hash_bucket;

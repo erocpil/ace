@@ -1,5 +1,6 @@
 #include "server.h"
 #include "task.h"
+#include "runner.h"
 
 /**
  * s0_rx_func - stream(0) handler
@@ -28,7 +29,6 @@ ssize_t s0_rx_func(struct lsquic_stream_ctx *sc)
 
 	switch (head->theme) {
 		case TASK_THEME_SENDFILE:
-			assert(!TASK_THEME_SENDFILE);
 		case TASK_THEME_PERF:
 			/* sendfile */
 			ylog("length %u sendfile %u stream %u info %s",
@@ -43,14 +43,14 @@ ssize_t s0_rx_func(struct lsquic_stream_ctx *sc)
 
 			/* parse negotiation info */
 			if (-1 == task->nego(task, skb)) {
-				elog("TODO task->nego()");
-				exit(-EXIT_FAILURE);
+				elog("task->nego() failed, aborting stream");
+				return -1;
 			}
 			SKB_DUMP(skb);
 
 			if (-1 == task->init(task)) {
-				elog("TODO task->init()");
-				exit(-EXIT_FAILURE);
+				elog("task->init() failed, aborting stream");
+				return -1;
 			}
 			SKB_DUMP(skb);
 
@@ -67,8 +67,8 @@ ssize_t s0_rx_func(struct lsquic_stream_ctx *sc)
 			if (tx->end >= skb->end) {
 				tx->end = skb->end;
 			} else {
-				rlog("%u %u TODO malloc() a new tx skb", tx->end, skb->end);
-				exit(-EXIT_FAILURE);
+				rlog("%u %u tx pool too small, aborting stream", tx->end, skb->end);
+				return -1;
 			}
 			tx->len = skb->len;
 			tx->tail = skb->tail;
@@ -140,56 +140,6 @@ static struct subtask default_subtask = {
 	.no = 0,
 };
 
-static void server_exit(struct ev_loop *loop, ev_signal *s, int revents)
-{
-	if (EV_ERROR & revents) {
-		elog("invalid event");
-	}
-
-	struct server *sr = (struct server*)s->data;
-	struct service *se = NULL;
-	list_for_each_entry(se, &sr->service_head, service_node) {
-		ylog("exit se %p %lu conn", se, se->n_client_conn);
-		struct lsquic_conn_ctx *lconn_ctx = NULL;
-		list_for_each_entry(lconn_ctx, &se->conn_head, conn_node) {
-			lsquic_conn_close(lconn_ctx->lconn);
-		}
-	}
-}
-
-static void server_signal_quit(struct ev_loop *loop, ev_signal *s, int revents)
-{
-	ylog("Signal QUIT captured");
-	server_exit(loop, s, revents);
-}
-
-static void server_signal_int(struct ev_loop *loop, ev_signal *s, int revents)
-{
-	ylog("Signal INT captured");
-	server_exit(loop, s, revents);
-	exit(-EXIT_FAILURE);
-}
-
-static void server_signal_term(struct ev_loop *loop, ev_signal *s, int revents)
-{
-	ylog("Signal TERM captured");
-	server_exit(loop, s, revents);
-	exit(-EXIT_FAILURE);
-}
-
-static void server_init_signal(struct server *sr)
-{
-	sr->signal_quit.data = (void*)sr;
-	sr->signal_int.data = (void*)sr;
-	sr->signal_term.data = (void*)sr;
-	ev_signal_init(&sr->signal_quit, server_signal_quit, SIGQUIT);
-	ev_signal_init(&sr->signal_int, server_signal_int, SIGINT);
-	ev_signal_init(&sr->signal_term, server_signal_term, SIGTERM);
-	ev_signal_start(sr->loop, &sr->signal_quit);
-	ev_signal_start(sr->loop, &sr->signal_int);
-	ev_signal_start(sr->loop, &sr->signal_term);
-}
-
 struct server *server_init()
 {
 	struct server *sr = (struct server*)malloc(sizeof(struct server));
@@ -201,7 +151,9 @@ struct server *server_init()
 	/* server's default event loop */
 	sr->loop = EV_DEFAULT;
 
-	server_init_signal(sr);
+	ace_runner_init_signal(sr->loop,
+			&sr->signal_quit, &sr->signal_int, &sr->signal_term,
+			(void*)sr);
 
 	return sr;
 }
@@ -215,7 +167,8 @@ int server_launch_service(struct server *sr, struct config_manager *cm)
 
 	list_for_each_entry(pos, &cm->config_head, config_node) {
 		if (-1 == config_check(pos)) {
-			exit(-EXIT_FAILURE);
+			elog("config_check failed, skipping");
+			continue;
 		}
 	}
 
@@ -231,16 +184,13 @@ int server_launch_service(struct server *sr, struct config_manager *cm)
 			struct connote *ce = connote_init(co_pos);
 			elog("  cc %p ce %p", co_pos, ce);
 			if (!ce) {
-				elog();
-				exit(-EXIT_FAILURE);
-				// TODO free ce and go on
+				elog("connote_init failed, skipping");
 				continue;
 			}
 			struct server_event *ev = (struct server_event*)malloc(sizeof(struct server_event));
 			if (!ev) {
-				// TODO
-				exit(-EXIT_FAILURE);
-				return -1;
+				elog("malloc server_event failed, skipping");
+				continue;
 			}
 			ce->event = (void*)ev;
 			service_add_connote(se, ce);
@@ -248,9 +198,8 @@ int server_launch_service(struct server *sr, struct config_manager *cm)
 		}
 		struct server_event_loop *evl = (struct server_event_loop*)malloc(sizeof(struct server_event_loop));
 		if (!evl) {
-			// TODO
-			exit(-EXIT_FAILURE);
-			return -1;
+			elog("malloc server_event_loop failed, skipping service");
+			continue;
 		}
 		memset(evl, 0, sizeof(*evl));
 		evl->sr = sr;
@@ -265,72 +214,25 @@ int server_launch_service(struct server *sr, struct config_manager *cm)
 
 void server_add_service(struct server *sr, struct service *se)
 {
-	struct list_head *head = &sr->service_head;
-	struct list_head *node = &se->service_node;
-	list_add_tail(head, node);
-	sr->n_service++;
+	ace_runner_add_service(&sr->service_head, &sr->n_service, se);
 }
 
-static void server_timeout_func(EV_P_ ev_timer *w, int revents)
+static void server_timeout_cb(EV_P_ ev_timer *w, int revents)
 {
-#if 0
-	log();
-	struct server *sr = (struct server*)w->data;
-	struct service *pos = NULL;
-	struct list_head *head = &sr->service_head;
-	list_for_each_entry(pos, head, service_node) {
-		struct server_event_loop *evl = (struct server_event_loop*)pos->loop;
-		if (!ev_async_pending(&evl->async_w)) {
-			log();
-			ev_async_send(evl->loop, &evl->async_w);
-		}
-	}
-#endif
-
-	w->repeat = 1.;
-	ev_timer_again(loop, w);
+	server_process_service(w->data);
 }
 
-/* client_run - run each service */
+/* server_run - run each service */
 int server_run(struct server *sr)
 {
-	if (!sr || !sr->n_service) {
-		elog();
-		return -1;
-	}
 	struct service *pos = NULL;
-	struct list_head *head = &sr->service_head;
-	list_for_each_entry(pos, head, service_node) {
-		server_run_service(sr, pos);
+	list_for_each_entry(pos, &sr->service_head, service_node) {
+		ace_runner_run_service(&sr->n_running_service, pos);
 	}
 
-	if (sr->n_service > 0) {
-		log();
-		ev_timer_init (&sr->tw, server_timeout_func, 1., 0.);
-		sr->tw.data = (void*)sr;
-		ev_timer_start (sr->loop, &sr->tw);
-		ev_run(sr->loop, 0);
-	}
-	log();
-
-	return 0;
-}
-
-/* client_run_service - run on service */
-int server_run_service(struct server *sr, struct service *se)
-{
-	int s = 0;
-	pthread_t thread;
-
-	s = pthread_create(&thread, NULL, service_func, (void*)se);
-	if (-1 == s) {
-		eslog("pthread_create()");
-		/// TODO free se
-	} else {
-		sr->n_running_service++;
-	}
-
-	return s;
+	return ace_runner_run(sr->loop, &sr->tw,
+			sr->n_service, (void*)sr,
+			server_timeout_cb);
 }
 
 static inline void server_timer_expired(EV_P_ ev_timer *timer, int revents)
@@ -357,10 +259,7 @@ static void server_async_w_cb (EV_P_ ev_async *w, int revents)
 	}
 }
 
-void server_recv_data(EV_P_ ev_io *w, int revents)
-{
-	service_packets_in(w->data);
-}
+#define server_recv_data ace_runner_recv_data
 
 /* !!!run in service thread or process!!! */
 int server_run_event(struct service *se)

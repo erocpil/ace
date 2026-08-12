@@ -169,21 +169,6 @@ struct lsquic_conn_ctx {
 	 r; \
 	 })
 
-/* XXX */
-#if 0
-#define lconn_ctx_move_one_stream_ctx(lc) \
-	do { \
-		struct list_head *head = &(lc)->running_stream_head; \
-		struct lsquic_stream_ctx *sc = \
-		list_first_entry_or_null(&(lc)->running_stream_head, struct lsquic_stream_ctx, stream_node); \
-		struct list_head *node = &(sc)->stream_node; \
-		list_del(node); \
-		(lc)->n_pending_stream--; \
-		list_add_tail(node, head); \
-		(lc)->n_running_stream++; \
-	} while (0)
-#endif
-
 #define lconn_ctx_add_running_stream_ctx(lc, sc) \
 	do { \
 		struct list_head *head = &(lc)->running_stream_head; \

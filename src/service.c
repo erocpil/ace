@@ -43,8 +43,8 @@ struct service *service_init(struct config *c)
 		return NULL;
 	}
 
-	/* !!! */
-	c->flags |= (long)se;
+	/* stash service reference for callbacks */
+	c->owner = se;
 	memcpy(&se->config, c, sizeof(*c));
 
 	if (0 != service_init_cert_hash(se)) {
@@ -118,10 +118,16 @@ static int service_log_buf(void *logger_ctx, const char *buf, size_t len)
 
 static int service_add_alpn(struct service *se, char *alpn)
 {
-	char *p = se->alpn + strlen(se->alpn);
+	size_t cur = strlen(se->alpn);
+	size_t need = 1 + strlen(alpn);
+	if (cur + need + 1 > sizeof(se->alpn)) {
+		elog("ALPN overflow: cur=%zu need=%zu max=%zu", cur, need, sizeof(se->alpn));
+		return -1;
+	}
+	char *p = se->alpn + cur;
 	char l = strlen(alpn);
 	memcpy(p, &l, sizeof(char));
-	memcpy(p + 1, alpn, strlen(alpn));
+	memcpy(p + 1, alpn, l);
 
 	return 0;
 }
@@ -442,8 +448,6 @@ static int service_init_ssl_ctx_server(struct service *se)
 	SSL_CTX *ssl_ctx = SSL_CTX_new(TLS_method());
 	if (!ssl_ctx) {
 		elog("SSL_CTX_new()");
-		SSL_CTX_free(ssl_ctx);
-		ssl_ctx = NULL;
 		return -1;
 	}
 	SSL_CTX_set_min_proto_version(ssl_ctx, TLS1_3_VERSION);
@@ -461,9 +465,11 @@ static int service_init_ssl_ctx_server(struct service *se)
 /* FIXME se->alpn */
 #define session_resume_file_path(sess, path, peer, dev) \
 do { \
+	char _ip[INET_ADDRSTRLEN]; \
 	struct sockaddr_in *_peer = (struct sockaddr_in*)(peer); \
+	inet_ntop(AF_INET, &_peer->sin_addr, _ip, sizeof(_ip)); \
 	snprintf((sess), sizeof(sess), "%s/%s_%d-%s", \
-			(path), inet_ntoa(_peer->sin_addr), ntohs(_peer->sin_port), (dev)); \
+			(path), _ip, ntohs(_peer->sin_port), (dev)); \
 } while (0)
 
 int on_new_session(SSL *ssl, SSL_SESSION *session)
@@ -558,8 +564,6 @@ static int service_init_ssl_ctx_client(struct service *se)
 	SSL_CTX *ssl_ctx = SSL_CTX_new(TLS_method());
 	if (!ssl_ctx) {
 		elog("SSL_CTX_new()");
-		SSL_CTX_free(ssl_ctx);
-		ssl_ctx = NULL;
 		return -1;
 	}
 	SSL_CTX_set_min_proto_version(ssl_ctx, TLS1_3_VERSION);
@@ -615,7 +619,9 @@ void *service_func(void *arg)
 	service_init_cert_hash(se);
 
 	if (-1 == service_init_ssl_ctx_map(se)) {
-		exit(-EXIT_FAILURE);
+		elog("service_init_ssl_ctx_map failed");
+		lsquic_engine_destroy(se->engine);
+		return NULL;
 	}
 
 	se->run_event(se);

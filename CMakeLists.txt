@@ -11,6 +11,7 @@ include_directories(${CMAKE_CURRENT_BINARY_DIR})
 include_directories(${PROJECT_SOURCE_DIR}/include/)
 include_directories(${PROJECT_SOURCE_DIR}/include/libev/)
 include_directories(${PROJECT_SOURCE_DIR}/include/lsquic/)
+include_directories(${PROJECT_SOURCE_DIR}/include/file/)
 
 if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64.*|AARCH64.*|arm64.*|ARM64.*)")
 	link_directories(${PROJECT_SOURCE_DIR}/lib/aarch64/)

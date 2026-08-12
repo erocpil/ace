@@ -4,7 +4,7 @@
 
 void rlimit()
 {
-	struct rlimit v;   //you can decelare any variable
+	struct rlimit v;
 
 	if (-1 == getrlimit(RLIMIT_CORE, &v)) {
 		eslog("getrlimit()");
@@ -27,7 +27,7 @@ void rlimit()
 int main(int argc, const char *argv[])
 {
 	PRINT_VERSION("ACE");
-	glog("ACE cpu_frequency %lf", MHz);
+	// glog("ACE cpu_frequency %lf", MHz);  // MHz undefined when lscpu fails
 
 
 	// daemon(1, 1);
