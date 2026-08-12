@@ -126,7 +126,7 @@ ssize_t s0_rx_func(struct lsquic_stream_ctx *sc)
 			for (unsigned short int i = 1; i < task->n_sub; i++) {
 				/* no need to assign rx/tx buffer */
 				struct lsquic_stream_ctx *sc =
-					service_stream_ctx_malloc(lconn_ctx->ce->cc, 0, 0);
+					service_stream_ctx_malloc(lconn_ctx, 0, 0);
 				if (!sc) {
 					lsquic_conn_abort(lconn_ctx->lconn);
 					return -1;
@@ -376,7 +376,7 @@ int server_run_event(struct service *se)
 lsquic_conn_ctx_t *server_on_new_conn(void *stream_if_ctx, struct lsquic_conn *conn)
 {
 	struct service *se = (struct service*)stream_if_ctx;
-	struct lsquic_conn_ctx *lconn_ctx = lconn_ctx_malloc();
+	struct lsquic_conn_ctx *lconn_ctx = lconn_ctx_malloc(se);
 	if (!lconn_ctx) {
 		lsquic_conn_abort(conn);
 		return NULL;
@@ -456,7 +456,7 @@ lsquic_stream_ctx_t *server_on_new_stream(void *stream_if_ctx,
 			ylog("bi stream from client %p %ld %p", stream, id, sc);
 			if (!lsquic_stream_id(stream)) {
 				/* stream 0 */
-				sc = service_stream_ctx_malloc_pending(lconn, -1, -1);
+				sc = service_stream_ctx_malloc_pending(lconn_ctx, -1, -1);
 				if (!sc || sc != lconn_ctx->pending) {
 					lsquic_conn_abort(lconn);
 					return NULL;
@@ -479,7 +479,7 @@ lsquic_stream_ctx_t *server_on_new_stream(void *stream_if_ctx,
 			break;
 		case 0x01:
 			ylog("bi stream from server %p %p", stream, sc);
-			sc = service_stream_ctx_malloc(lconn_ctx->ce->cc, -1, -1);
+			sc = service_stream_ctx_malloc(lconn_ctx, -1, -1);
 			if (!sc) {
 				lsquic_conn_abort(lconn);
 				return NULL;

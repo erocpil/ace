@@ -32,6 +32,10 @@ struct service *service_init(struct config *c)
 	}
 	memset(se, 0, sizeof(*se));
 
+	/* P3: initialise service-level memory budget */
+	ace_mem_budget_init(&se->mem_budget, "service",
+	                    ACE_MEM_DEFAULT_SERVICE_BUDGET, NULL);
+
 	se->engine_settings = (struct lsquic_engine_settings*)
 		malloc(sizeof(struct lsquic_engine_settings));
 	if (!se->engine_settings) {
@@ -405,6 +409,20 @@ static int service_init_ssl_ctx_client(struct service *se)
 	const char *hostname  = getenv("ACE_HOSTNAME");
 	const char *insecure  = getenv("ACE_TLS_INSECURE");
 
+	/* When no explicit hostname and not in insecure mode, try to
+	 * derive it from the first co_config's host field. */
+	char hostname_buf[256] = { 0 };
+	if (!hostname && !(insecure && !strcmp(insecure, "1"))) {
+		struct co_config *cc =
+			list_first_entry_or_null(&se->config.co_config_head,
+						 struct co_config,
+						 co_config_node);
+		if (cc && cc->host[0]) {
+			strncpy(hostname_buf, cc->host, sizeof(hostname_buf) - 1);
+			hostname = hostname_buf;
+		}
+	}
+
 	struct tls_ctx_params params = {
 		.mode           = TLS_CTX_MODE_CLIENT,
 		.ca_file        = ca_file,
@@ -625,39 +643,63 @@ void service_stream_ctx_free(struct lsquic_stream_ctx *sc)
 	}
 	sc->tx = NULL;
 
+	/* P3: release stream ctx charge from connection budget */
+	struct ace_mem_budget *conn_budget = sc->mem_budget.parent;
+
 	free(sc);
+
+	if (conn_budget) {
+		ace_mem_release(conn_budget, sizeof(struct lsquic_stream_ctx));
+	}
 }
 
-struct lsquic_stream_ctx *service_stream_ctx_malloc(struct co_config *cc,
+struct lsquic_stream_ctx *service_stream_ctx_malloc(struct lsquic_conn_ctx *lc,
 		ssize_t rx_len, ssize_t tx_len)
 {
-	struct lsquic_stream_ctx *sc = lstream_ctx_malloc();
-	if (!sc) {
+	if (!lc || !lc->ce || !lc->ce->cc) {
+		errno = EINVAL;
 		return NULL;
 	}
+
+	/* P3: charge connection budget for the stream ctx itself */
+	if (0 != ace_mem_charge(&lc->mem_budget, sizeof(struct lsquic_stream_ctx))) {
+		eslog("stream_ctx charge failed (conn budget)");
+		return NULL;
+	}
+
+	struct lsquic_stream_ctx *sc = lstream_ctx_malloc();
+	if (!sc) {
+		ace_mem_release(&lc->mem_budget, sizeof(struct lsquic_stream_ctx));
+		return NULL;
+	}
+
+	/* P3: wire stream budget under connection budget */
+	ace_mem_budget_init(&sc->mem_budget, "stream",
+	                    ACE_MEM_DEFAULT_STREAM_BUDGET,
+	                    &lc->mem_budget);
 
 	INIT_LIST_HEAD(&sc->stream_node);
 	INIT_LIST_HEAD(&sc->rxq);
 	INIT_LIST_HEAD(&sc->txq);
-	if (!cc) {
-		free(sc);
-		errno = EINVAL;
-		return NULL;
-	}
-	sc->rx = skb_malloc(rx_len);
+
+	sc->rx = skb_malloc_charged(&sc->mem_budget, rx_len);
 	if (!sc->rx || !lstream_ctx_add_rxq(sc, sc->rx)) {
 		skb_free(sc->rx);
 		free(sc);
+		ace_mem_release(&lc->mem_budget, sizeof(struct lsquic_stream_ctx));
 		return NULL;
 	}
-	sc->tx = skb_malloc(tx_len);
+	sc->tx = skb_malloc_charged(&sc->mem_budget, tx_len);
 	if (!sc->tx || !lstream_ctx_add_txq(sc, sc->tx)) {
 		skb_free(sc->tx);
 		lstream_ctx_del_rxq(sc, sc->rx);
 		skb_free(sc->rx);
 		free(sc);
+		ace_mem_release(&lc->mem_budget, sizeof(struct lsquic_stream_ctx));
 		return NULL;
 	}
+
+	struct co_config *cc = lc->ce->cc;
 	sc->rx_func = cc->rx_func;
 	sc->tx_func = cc->tx_func;
 	/* FIXME */
@@ -667,12 +709,11 @@ struct lsquic_stream_ctx *service_stream_ctx_malloc(struct co_config *cc,
 	return sc;
 }
 
-struct lsquic_stream_ctx *service_stream_ctx_malloc_pending(struct lsquic_conn *lconn,
+struct lsquic_stream_ctx *service_stream_ctx_malloc_pending(struct lsquic_conn_ctx *lc,
 		ssize_t rx_len, ssize_t tx_len)
 {
-	return (lsquic_conn_get_ctx(lconn)->pending =
-			service_stream_ctx_malloc(
-				lsquic_conn_get_ctx(lconn)->ce->cc, rx_len, tx_len));
+	lc->pending = service_stream_ctx_malloc(lc, rx_len, tx_len);
+	return lc->pending;
 }
 
 ssize_t service_rx_func(struct lsquic_stream *stream, lsquic_stream_ctx_t *sc)

@@ -1,4 +1,4 @@
-add_executable(test_sk_buff test_sk_buff.c)
+add_executable(test_sk_buff test_sk_buff.c ${PROJECT_SOURCE_DIR}/src/mem_budget.c)
 target_include_directories(test_sk_buff PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_compile_options(test_sk_buff PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 add_test(NAME sk_buff COMMAND test_sk_buff)
@@ -13,6 +13,11 @@ if(CMAKE_C_COMPILER_ID MATCHES "Clang")
 	target_compile_options(test_task_protocol PRIVATE -Wno-gnu-variable-sized-type-not-at-end)
 endif()
 add_test(NAME task_protocol COMMAND test_task_protocol)
+
+add_executable(test_protocol_codec test_protocol_codec.c ${PROJECT_SOURCE_DIR}/src/protocol_codec.c)
+target_include_directories(test_protocol_codec PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_options(test_protocol_codec PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME protocol_codec COMMAND test_protocol_codec)
 
 add_executable(test_udp_send test_udp_send.c)
 target_include_directories(test_udp_send PRIVATE ${PROJECT_SOURCE_DIR}/src)
@@ -33,6 +38,12 @@ add_executable(test_quic_connection test_quic_connection.c ${PROJECT_SOURCE_DIR}
 target_include_directories(test_quic_connection PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_compile_options(test_quic_connection PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 add_test(NAME quic_connection COMMAND test_quic_connection)
+
+add_executable(test_mem_budget unit/test_mem_budget.c ${PROJECT_SOURCE_DIR}/src/mem_budget.c)
+target_include_directories(test_mem_budget PRIVATE
+	${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/tests/unit)
+target_compile_options(test_mem_budget PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME mem_budget COMMAND test_mem_budget)
 
 add_executable(test_quic_global_concurrency
 	test_quic_global_concurrency.c ${PROJECT_SOURCE_DIR}/src/quic_global.c)
@@ -87,6 +98,10 @@ add_test(
 	NAME fault_injection_contract
 	COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/check-fault-injection.sh
 		${PROJECT_SOURCE_DIR})
+
+add_test(
+	NAME tls_identity_verification
+	COMMAND bash ${PROJECT_SOURCE_DIR}/scripts/tls-verify-test.sh)
 
 if(ACE_BUILD_FUZZERS)
 	if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")

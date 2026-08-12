@@ -23,6 +23,7 @@
 
 #include "tls_context.h"
 #include "quic_connection.h"
+#include "mem_budget.h"
 
 struct ev_loop;
 
@@ -55,6 +56,9 @@ struct service {
 	/* P2: connection outcome counters (aggregated after engine destroy) */
 	int n_conn_closed;
 	int n_conn_failed;
+
+	/* P3: memory budget for this service */
+	struct ace_mem_budget mem_budget;
 
 	void *loop;
 	// size_t (*add_event)();
@@ -100,6 +104,9 @@ struct lsquic_stream_ctx {
 	size_t tx_bytes;
 	unsigned short int new_action;
 	unsigned short int end_action;
+
+	/* P3: per-stream memory budget (parent = connection budget) */
+	struct ace_mem_budget mem_budget;
 };
 
 static inline struct lsquic_stream_ctx *lstream_ctx_malloc(void)
@@ -195,9 +202,12 @@ struct lsquic_conn_ctx {
 	int session_resume_saved;
 
 	struct ace_connection conn;  /* P2: connection state machine */
+
+	/* P3: per-connection memory budget (parent = service budget) */
+	struct ace_mem_budget mem_budget;
 };
 
-static inline struct lsquic_conn_ctx *lconn_ctx_malloc(void)
+static inline struct lsquic_conn_ctx *lconn_ctx_malloc(struct service *se)
 {
 	struct lsquic_conn_ctx *r = calloc(1, sizeof(*r));
 	if (!r) {
@@ -207,6 +217,12 @@ static inline struct lsquic_conn_ctx *lconn_ctx_malloc(void)
 	INIT_LIST_HEAD(&r->running_stream_head);
 	INIT_LIST_HEAD(&r->pending_stream_head);
 	ace_conn_init(&r->conn);
+
+	/* P3: wire connection budget under service budget */
+	ace_mem_budget_init(&r->mem_budget, "conn",
+	                    ACE_MEM_DEFAULT_CONN_BUDGET,
+	                    &se->mem_budget);
+
 	return r;
 }
 
@@ -293,9 +309,10 @@ struct lsquic_conn *service_connect(struct connote *ce);
 struct lsquic_conn *service_connect_nop(struct connote *ce);
 struct sk_buff *service_skb_malloc(ssize_t len);
 void service_sk_buff(struct sk_buff *stb);
-struct lsquic_stream_ctx *service_stream_ctx_malloc(struct co_config *cc,
+struct lsquic_stream_ctx *service_stream_ctx_malloc(struct lsquic_conn_ctx *lc,
 		ssize_t rx_len, ssize_t tx_len);
-struct lsquic_stream_ctx *service_stream_ctx_malloc_pending(struct lsquic_conn *lconn, ssize_t rx_len, ssize_t tx_len);
+struct lsquic_stream_ctx *service_stream_ctx_malloc_pending(struct lsquic_conn_ctx *lc,
+		ssize_t rx_len, ssize_t tx_len);
 void service_stream_ctx_free(struct lsquic_stream_ctx *sc);
 ssize_t service_on_read(struct lsquic_stream *stream, lsquic_stream_ctx_t *sc);
 ssize_t service_on_write(struct lsquic_stream *stream, lsquic_stream_ctx_t *sc);

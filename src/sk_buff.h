@@ -8,6 +8,7 @@
 #include <sys/types.h>
 #include "list.h"
 #include "define.h"
+#include "mem_budget.h"
 
 #define DEFAULT_SKB_SIZE (0x10000) /* 64K */
 
@@ -35,6 +36,9 @@ struct sk_buff {
 	 * data could be malloc()ed with sk_buff or assigned a pointer,
 	 * TODO for the later case, service_sk_buff_free() will not free the pointer.
 	 */
+
+	/* P3: auto-release tracked memory in skb_free */
+	struct ace_mem_budget *budget;
 } __attribute__((aligned(sizeof(char))));
 
 #define SKB_DUMP(skb) \
@@ -160,6 +164,9 @@ static inline void *skb_pull(struct sk_buff *skb, unsigned int len)
 static inline void skb_free(struct sk_buff *skb)
 {
 	if (skb) {
+		size_t total = sizeof(*skb) + skb->end;
+		struct ace_mem_budget *b = skb->budget;
+
 		// SKB_DUMP(skb);
 		if ((void*)(skb + 1) != skb->head ) {
 			if (skb->head) {
@@ -167,6 +174,11 @@ static inline void skb_free(struct sk_buff *skb)
 			}
 		}
 		free(skb);
+
+		/* P3: release tracked memory AFTER free */
+		if (b) {
+			ace_mem_release(b, total);
+		}
 	}
 }
 
@@ -210,6 +222,56 @@ static struct sk_buff *skb_malloc(ssize_t len)
 	skb_reset_tail_pointer(r);
 	skb_set_end_offset(r, (unsigned int)payload_size);
 	INIT_LIST_HEAD(&r->skb_node);
+
+	return r;
+}
+
+/*
+ * skb_malloc_charged — same as skb_malloc but charges a budget.
+ * On failure, budget is NOT touched and NULL is returned.
+ * On success, skb->budget is set; skb_free() will auto-release.
+ */
+static struct sk_buff *skb_malloc_charged(struct ace_mem_budget *b, ssize_t len)
+{
+	size_t size = sizeof(struct sk_buff);
+	size_t payload_size;
+
+	if (len < -1) {
+		errno = EINVAL;
+		return NULL;
+	}
+
+	if (!len) {
+		payload_size = 0;
+	} else {
+		if (-1 == len) {
+			len = DEFAULT_SKB_SIZE;
+		}
+		payload_size = (size_t)len;
+		if (payload_size > UINT32_MAX || payload_size > SIZE_MAX - size) {
+			errno = EOVERFLOW;
+			return NULL;
+		}
+	}
+	size += payload_size;
+
+	if (0 != ace_mem_charge(b, size)) {
+		return NULL;
+	}
+
+	struct sk_buff *r = (struct sk_buff*)malloc(size);
+	if (!r) {
+		ace_mem_release(b, size);
+		return NULL;
+	}
+
+	memset(r, 0, sizeof(*r));
+	r->head = (unsigned char*)(r + 1);
+	r->data = r->head;
+	skb_reset_tail_pointer(r);
+	skb_set_end_offset(r, (unsigned int)payload_size);
+	INIT_LIST_HEAD(&r->skb_node);
+	r->budget = b;
 
 	return r;
 }
