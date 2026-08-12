@@ -64,7 +64,11 @@ void client_add_service(struct client *sr, struct service *se)
 
 static void client_timeout_cb(EV_P_ ev_timer *w, int revents)
 {
-	client_process_service(w->data);
+	struct client *ct = (struct client*)w->data;
+	struct service *pos = NULL;
+	list_for_each_entry(pos, &ct->service_head, service_node) {
+		client_process_service(EV_A_ pos);
+	}
 }
 
 /* client_run - run each service */
@@ -84,7 +88,7 @@ int client_run(struct client *ct)
 
 static inline void client_timer_expired(EV_P_ ev_timer *timer, int revents)
 {
-	client_process_service(timer->data);
+	client_process_service(EV_A_ timer->data);
 }
 
 static void client_async_w_cb(EV_P_ ev_async *w, int revents)
@@ -171,7 +175,7 @@ static int client_process_upstream_read(struct upstream_echo *echo)
 			upstream_skb_head_dump(&nh);
 		}
 #endif
-		se->process(se);
+		se->process(*(struct ev_loop **)se->loop, se);
 
 		/* 3. place external entity */
 		struct lsquic_conn_ctx *lconn_ctx = lsquic_conn_get_ctx(lconn);
@@ -616,13 +620,13 @@ void client_on_datagram(lsquic_conn_t *conn, const void *buf, size_t bufsz)
 	elog();
 }
 
-void client_process_service(struct service *se)
+void client_process_service(EV_P_ struct service *se)
 {
 	int diff;
 	ev_tstamp timeout;
 	struct client_event_loop *evl = (struct client_event_loop*)se->loop;
 
-	ev_timer_stop(evl->loop, &evl->timer);
+	ev_timer_stop(EV_A_ &evl->timer);
 	if (service_is_stopped(se)) {
 		elog("service %p is stopped %d", se, se->state);
 		return;
@@ -640,7 +644,8 @@ void client_process_service(struct service *se)
 		}
 		// ylog("timeout %f", timeout);
 		ev_timer_init(&evl->timer, client_timer_expired, timeout, 0.);
-		ev_timer_start(evl->loop, &evl->timer);
+		evl->timer.data = (void*)se;
+		ev_timer_start(EV_A_ &evl->timer);
 	} else {
 		plog("no more connection");
 	}

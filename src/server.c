@@ -219,7 +219,11 @@ void server_add_service(struct server *sr, struct service *se)
 
 static void server_timeout_cb(EV_P_ ev_timer *w, int revents)
 {
-	server_process_service(w->data);
+	struct server *sr = (struct server*)w->data;
+	struct service *pos = NULL;
+	list_for_each_entry(pos, &sr->service_head, service_node) {
+		server_process_service(EV_A_ pos);
+	}
 }
 
 /* server_run - run each service */
@@ -237,7 +241,7 @@ int server_run(struct server *sr)
 
 static inline void server_timer_expired(EV_P_ ev_timer *timer, int revents)
 {
-	server_process_service(timer->data);
+	server_process_service(EV_A_ timer->data);
 }
 
 static void server_async_w_cb (EV_P_ ev_async *w, int revents)
@@ -509,13 +513,13 @@ void server_on_datagram(lsquic_conn_t *conn, const void *buf, size_t bufsz)
 	elog();
 }
 
-void server_process_service(struct service *se)
+void server_process_service(EV_P_ struct service *se)
 {
 	int diff;
 	ev_tstamp timeout;
 	struct server_event_loop *evl = (struct server_event_loop*)se->loop;
 
-	ev_timer_stop(evl->loop, &evl->timer);
+	ev_timer_stop(EV_A_ &evl->timer);
 	if (service_is_stopped(se)) {
 		elog("service %p is stopped %d", se, se->state);
 		return;
@@ -532,7 +536,8 @@ void server_process_service(struct service *se)
 			timeout = (ev_tstamp) LSQUIC_DF_CLOCK_GRANULARITY / 1000000;
 		}
 		ev_timer_init(&evl->timer, server_timer_expired, timeout, 0.);
-		ev_timer_start(evl->loop, &evl->timer);
+		evl->timer.data = (void*)se;
+		ev_timer_start(EV_A_ &evl->timer);
 	} else {
 		rlog("no more connection");
 	}

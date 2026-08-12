@@ -54,3 +54,4 @@ dkms.conf
 # Build artifacts
 build/
 .deps/
+core

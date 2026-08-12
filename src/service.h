@@ -46,7 +46,7 @@ struct service {
 	void *loop;
 	// size_t (*add_event)();
 	int (*run_event)();
-	void (*process)(struct service*);
+	void (*process)(struct ev_loop *, struct service*);
 
 	/* log */
 	FILE *s_log_fh;

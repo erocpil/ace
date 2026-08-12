@@ -454,6 +454,18 @@ static int service_init_ssl_ctx_server(struct service *se)
 	SSL_CTX_set_max_proto_version(ssl_ctx, TLS1_3_VERSION);
 	SSL_CTX_set_default_verify_paths(ssl_ctx);
 
+	/* Load self-signed certificate */
+	if (1 != SSL_CTX_use_certificate_file(ssl_ctx, "certs/server.crt", SSL_FILETYPE_PEM)) {
+		elog("SSL_CTX_use_certificate_file()");
+		SSL_CTX_free(ssl_ctx);
+		return -1;
+	}
+	if (1 != SSL_CTX_use_PrivateKey_file(ssl_ctx, "certs/server.key", SSL_FILETYPE_PEM)) {
+		elog("SSL_CTX_use_PrivateKey_file()");
+		SSL_CTX_free(ssl_ctx);
+		return -1;
+	}
+
 	blog("se %p ssl_ctx %p", se, ssl_ctx);
 	se->ssl_ctx = ssl_ctx;
 
@@ -736,7 +748,7 @@ struct lsquic_conn *service_connect(struct connote *ce)
 		log("lsquic_engine_connect()");
 	}
 
-	se->process(se);
+	se->process(*(struct ev_loop **)se->loop, se);
 
 	return lconn;
 }
@@ -1021,12 +1033,12 @@ void service_packets_in(struct connote *ce)
 #endif
 	switch (n) {
 		case 0:
-			se->process(ce->service);
+			se->process(*(struct ev_loop **)ce->service->loop, ce->service);
 			break;
 		case 1:
 			blog();
 			// FIXME
-			se->process(ce->service);
+			se->process(*(struct ev_loop **)ce->service->loop, ce->service);
 			break;
 		case -1:
 			elog("lsquic_engine_packet_in()");

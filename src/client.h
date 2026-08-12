@@ -68,7 +68,7 @@ void client_on_reset(lsquic_stream_t *s, lsquic_stream_ctx_t *h, int how);
 void client_on_conncloseframe_received(lsquic_conn_t *c,
 		int app_error, uint64_t error_code,
 		const char *reason, int reason_len);
-void client_process_service(struct service *se);
+void client_process_service(EV_P_ struct service *se);
 
 static struct lsquic_stream_if default_client_stream_if = {
 	.on_new_conn = client_on_new_conn,
