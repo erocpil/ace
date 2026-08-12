@@ -1,3 +1,5 @@
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+
 ## About ACE
 
 ACE is a QUIC-based client/server framework written in C, built on top of [lsquic](https://github.com/litespeedtech/lsquic) (LiteSpeed QUIC library) and [libev](http://software.schmorp.de/pkg/libev.html). It provides:
@@ -163,6 +165,10 @@ Recent improvements:
 - **Code cleanup** — removed dead `#if 0` blocks, fixed `ace_hash_del` logic
 - **Graceful shutdown** — signal handler with `ev_break`, extracted `runner.c`
 - **Build system** — `scripts/build-deps.sh` for reproducible dependency builds
+
+## License
+
+MIT — see [LICENSE](LICENSE).
 
 ## TODO
 
