@@ -65,7 +65,10 @@ int main(int argc, const char *argv[])
 					// c->log_level = "debug";
 					c->retry = 3;
 					c->retry_timeout = 1000;
-				c->file = "/var/run/client";
+				c->file = getenv("ACE_UPSTREAM_FILE");
+				if (!c->file || !c->file[0]) {
+					c->file = "/var/run/client";
+				}
 				c->auto_connect = 1;
 
 					struct co_config *co = config_get_first_co(c);

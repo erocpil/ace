@@ -23,7 +23,7 @@ cleanup() {
 	else
 		info "Failure logs retained in /tmp/ace-server.log and /tmp/ace-client.log"
 	fi
-	 rm -f /tmp/ace-smoke-input.bin /var/run/client
+	 rm -f /tmp/ace-smoke-input.bin "${ACE_UPSTREAM_FILE:-/var/run/client}"
 	 rm -f received/ace-smoke-input.bin
 	if [ -n "${CERT_DIR:-}" ]; then
 		rm -f "$CERT_DIR/cert.pem" "$CERT_DIR/key.pem"
@@ -36,6 +36,7 @@ cd "$(dirname "$0")/.."
 ACE_BUILD_DIR=${ACE_BUILD_DIR:-build}
 export ACE_IP_VERSION=${ACE_IP_VERSION:-4}
 CERT_DIR=$(mktemp -d /tmp/ace-cert.XXXXXX)
+export ACE_UPSTREAM_FILE=${ACE_UPSTREAM_FILE:-$CERT_DIR/client.sock}
 openssl req -newkey rsa:2048 -nodes -x509 -days 1 \
 	-keyout "$CERT_DIR/key.pem" -out "$CERT_DIR/cert.pem" -subj '/CN=localhost' \
 	>/dev/null 2>&1
@@ -99,7 +100,7 @@ fi
 
 # ---- 4. Transfer a real file over data streams and verify persisted bytes ----
 dd if=/dev/urandom of=/tmp/ace-smoke-input.bin bs=1024 count=96 status=none
-printf 'sf 3 /tmp/ace-smoke-input.bin\n' | socat - UNIX-CONNECT:/var/run/client
+printf 'sf 3 /tmp/ace-smoke-input.bin\n' | socat - UNIX-CONNECT:"$ACE_UPSTREAM_FILE"
 for _attempt in $(seq 1 40); do
     if [ -f received/ace-smoke-input.bin ] &&
        cmp -s /tmp/ace-smoke-input.bin received/ace-smoke-input.bin; then
