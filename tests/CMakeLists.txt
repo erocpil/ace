@@ -103,6 +103,20 @@ add_test(
 	NAME tls_identity_verification
 	COMMAND bash ${PROJECT_SOURCE_DIR}/scripts/tls-verify-test.sh)
 
+add_test(
+	NAME queue_saturation_contract
+	COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/check-queue-saturation.sh
+		${PROJECT_SOURCE_DIR})
+
+add_test(
+	NAME peer_abort_contract
+	COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/check-peer-abort.sh
+		${PROJECT_SOURCE_DIR})
+
+add_test(
+	NAME connection_isolation
+	COMMAND bash ${PROJECT_SOURCE_DIR}/scripts/connection-isolation-test.sh)
+
 if(ACE_BUILD_FUZZERS)
 	if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
 		message(FATAL_ERROR "ACE_BUILD_FUZZERS requires Clang")
