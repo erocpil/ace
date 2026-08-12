@@ -25,6 +25,8 @@ struct ev_loop;
 
 /* one service represents a type of connections driven by an identical lsquic engine,
  * aka. with same params, they all run in the same thread or process */
+struct tls_ctx;
+
 struct service {
 	struct list_head service_node;
 	struct lsquic_engine_settings *engine_settings;
@@ -33,6 +35,7 @@ struct service {
 	struct lsquic_stream_if *stream_if;
 	lsquic_packets_out_f packets_out;
 	SSL_CTX *ssl_ctx;
+	struct tls_ctx *tls;
 	struct ace_hash *cert_hash;
 
 	volatile size_t rx_bytes;

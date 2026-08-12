@@ -1,5 +1,5 @@
 add_executable(ace
-	ace.c server.c client.c service.c connote.c config.c upstream.c task.c runner.c quic_global.c )
+	ace.c server.c client.c service.c connote.c config.c upstream.c task.c runner.c quic_global.c tls_context.c )
 add_dependencies(ace auth)
 target_compile_definitions(ace PRIVATE
 	ACE_DEFAULT_CERT_FILE="${cert}"

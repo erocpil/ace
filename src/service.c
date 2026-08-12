@@ -7,6 +7,7 @@
 #include "io_retry.h"
 #include "net_addr.h"
 #include "quic_global.h"
+#include "tls_context.h"
 
 static inline int service_init_ssl_ctx(struct service *se);
 static int service_init_ssl_ctx_server(struct service *se);
@@ -79,7 +80,9 @@ void service_free(struct service *se)
 		/* TODO free_func() */
 		ace_hash_free(se->cert_hash, NULL);
 	}
-	// TODO free se->ssl_ctx
+	if (se->tls) {
+		tls_ctx_free(se->tls);
+	}
 
 	free(se);
 }
@@ -246,249 +249,58 @@ int service_init_cert_hash(struct service *se)
 	return 0;
 }
 
-static int CertVerifyCallback()
-{
-	elog("TODO");
-	return 0;
-}
-
-static int service_select_alpn(SSL *ssl, const unsigned char **out,
-		unsigned char *outlen, const unsigned char *in,
-		unsigned int inlen, void *arg)
-{
-	elog();
-	struct service *se = (struct service*)arg;
-
-	int r = SSL_select_next_proto((unsigned char **)out, outlen, in, inlen,
-			(unsigned char*)se->alpn, strlen(se->alpn));
-	if (r == OPENSSL_NPN_NEGOTIATED) {
-		log("alpn \"%s\" SSL_TLSEXT_ERR_OK", in);
-		// TODO setup callbacks of this ALPN
-		return SSL_TLSEXT_ERR_OK;
-	} else {
-		log("no supported protocol can be selected from '%.*s'",
-				(int)inlen, (char*)in);
-		return SSL_TLSEXT_ERR_ALERT_FATAL;
-	}
-}
-
-static void hexstr(const unsigned char *buf,
-		size_t bufsz, char *out, size_t outsz)
-{
-	static const char b2c[] = "0123456789ABCDEF";
-	const unsigned char *const end_input = buf + bufsz;
-	char *const end_output = out + outsz;
-
-	while (buf < end_input && out + 2 < end_output)
-	{
-		*out++ = b2c[ *buf >> 4 ];
-		*out++ = b2c[ *buf & 0xF ];
-		++buf;
-	}
-
-	if (buf < end_input)
-		out[-1] = '!';
-
-	*out = '\0';
-}
-
-static void service_keylog_line(const SSL *ssl, const char *line)
-{
-	const char *keylog= getenv("SSLSKEYLOG");
-	const lsquic_conn_t *conn = lsquic_ssl_to_conn(ssl);
-	struct lsquic_conn_ctx *lconn_ctx = lsquic_conn_get_ctx(conn);
-	FILE *file = NULL;
-
-	if (lconn_ctx) {
-		file = lconn_ctx->keylog_file;
-		/*
-		log("se %p ce %p lconn_ctx %p keylog_file %p",
-				lconn_ctx->ce->service, lconn_ctx->ce, lconn_ctx,
-				lconn_ctx->keylog_file);
-				*/
-	} else {
-		/* when a server log a key during hsk, ctx was not created */
-		blog("server in hsk");
-	}
-
-	if (!file) {
-		int sz;
-		char id_str[MAX_CID_LEN * 2 + 1];
-		char path[PATH_MAX];
-
-		const lsquic_cid_t *cid = lsquic_conn_id(conn);
-		hexstr(cid->idbuf, cid->len, id_str, sizeof(id_str));
-		sz = snprintf(path, sizeof(path), "%s/%s.keys", keylog, id_str);
-		if ((size_t) sz >= sizeof(path)) {
-			elog("%s: key log path too long", __func__);
-			return;
-		}
-		file = fopen(path, "ab");
-		if (!file) {
-			eslog("could not open %s for writing", path);
-			return;
-		} else {
-			log("open keylog file %p \"%s\"", file, path);
-		}
-		if (lconn_ctx) {
-			rlog("server got lconn_ctx");
-			lconn_ctx->keylog_file = file;
-		}
-	}
-	fputs(line, file);
-	fputs("\n", file);
-	fflush(file);
-	if (!lconn_ctx) {
-		/* for a server in hsk */
-		fclose(file);
-	}
-}
-
 static int service_init_ssl_ctx_map(struct service *se)
 {
-	const char *cert_file = getenv("ACE_CERT_FILE");
-	const char *key_file = getenv("ACE_KEY_FILE");
-	if (!cert_file || !*cert_file) cert_file = ACE_DEFAULT_CERT_FILE;
-	if (!key_file || !*key_file) key_file = ACE_DEFAULT_KEY_FILE;
-	SSL_CTX *ssl_ctx = SSL_CTX_new(TLS_method());
-	if (!ssl_ctx) {
-		log();
+	/* Register the tls_ctx's SSL_CTX in the cert hash so
+	 * service_lookup_cert() can return it for any SNI value.
+	 * Multi-cert SNI support is future work. */
+	if (!se->ssl_ctx) {
+		elog("ssl_ctx not initialized before map");
 		return -1;
 	}
-
-	SSL_CTX_set_min_proto_version(ssl_ctx, TLS1_3_VERSION);
-	SSL_CTX_set_max_proto_version(ssl_ctx, TLS1_3_VERSION);
-	SSL_CTX_set_alpn_select_cb(ssl_ctx, service_select_alpn, se);
-	SSL_CTX_set_default_verify_paths(ssl_ctx);
-
-	if (0) {
-		log("Setting CA");
-		if (!SSL_CTX_load_verify_locations(
-					ssl_ctx, "root.cert.pem", NULL)) {
-			elog("Failed to load root certificates.\n");
-				SSL_CTX_free(ssl_ctx);
-				return -1;
-		}
-		log("Setting verify");
-		SSL_CTX_set_verify(ssl_ctx,
-				SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT,
-				CertVerifyCallback);
-	} else {
-		log("Setting no verify");
-	}
-	log("Setting cert %s", cert_file);
-	if (1 != SSL_CTX_use_certificate_chain_file(
-				ssl_ctx, cert_file)) {
-		eslog("SSL_CTX_use_certificate_chain_file()");
-		SSL_CTX_free(ssl_ctx);
-		return -1;
-	}
-	/* TODO .pkcs8 file */
-	log("Setting psk %s", key_file);
-	if (1 != SSL_CTX_use_PrivateKey_file(
-				ssl_ctx, key_file,
-				SSL_FILETYPE_PEM)) {
-		elog("SSL_CTX_use_PrivateKey_file()");
-		SSL_CTX_free(ssl_ctx);
-		return -1;
-	}
-
-	/* keylog */
-	if (se->config.keylog_path && strlen(se->config.keylog_path) > 0) {
-		unsetenv("SSLSKEYLOG");
-		setenv("SSLSKEYLOG", se->config.keylog_path, 1);
-		SSL_CTX_set_keylog_callback(ssl_ctx, service_keylog_line);
-	}
-
-#if 0
-	if (!sconf.keylog().empty()) {
-		unsetenv("SSLSKEYLOG");
-		setenv("SSLSKEYLOG", sconf.keylog().c_str(), 1);
-		// log("keylog %s", sconf.keylog().c_str());
-		SSL_CTX_set_keylog_callback(ssl_ctx, keylog_line);
-	}
-#endif
-
-	/* TODO ssl.h SSL_CTX_sess_set_new_cb SSL_SESS_CACHE_SERVER */
-	/* session */
-	/*
-	 // server doesn't need it?
-	 if (!sconf.resume().empty()) {
-	 log("resume");
-	// SSL_CTX_set_session_cache_mode(lsquic.ssl_ctx, SSL_SESS_CACHE_CLIENT);
-	const int was = SSL_CTX_set_session_cache_mode(ssl_ctx, 1);
-	log("set SSL session cache mode to 1 (was: %d)", was);
-	// SSL_CTX_set_early_data_enabled(ssl_ctx, 1);
-	// SSL_CTX_sess_set_new_cb(ssl_ctx, prog_new_session_cb);
-	}
-	*/
 
 	char *key = "sni";
-	char *val = (char*)ssl_ctx;
+	char *val = (char *)se->ssl_ctx;
 	unsigned int klen = strlen(key) + 1;
 	unsigned int vlen = 0;
-	log("%s %d %p %d", key, klen, val, vlen);
-	ace_hash_add(se->cert_hash, key, klen, val, vlen);
 
-	if (ace_hash_lookup(se->cert_hash, key, klen, &val, &vlen)) {
-		log("%s %d %p %d", key, klen, val, vlen);
-	} else {
-		log("%s %d %p %d", key, klen, val, vlen);
-		elog("hash lookup");
+	if (0 != ace_hash_add(se->cert_hash, key, klen, val, vlen)) {
+		elog("cert_hash insert failed");
+		return -1;
 	}
 
-#if 0
-	{
-		char *key = "ace";
-		char *val = "sni as value";
-		unsigned int klen = strlen(key) + 1;
-		unsigned int vlen = strlen(val) + 1;
-		log("%s %d %s %d", key, klen, val, vlen);
-		ace_hash_add(se->cert_hash, key, klen, val, vlen);
-		log("%s %d %s %d", key, klen, val, vlen);
-
-		if (ace_hash_lookup(se->cert_hash, key, klen, &val, &vlen)) {
-			log("%s %d %s %d", key, klen, val, vlen);
-		} else {
-			log("%s %d %s %d", key, klen, val, vlen);
-			elog("hash lookup");
-		}
-	}
-#endif
-
+	blog("cert_hash: registered %s -> ssl_ctx=%p", key, (void *)se->ssl_ctx);
 	return 0;
 }
 
 static int service_init_ssl_ctx_server(struct service *se)
 {
 	const char *cert_file = getenv("ACE_CERT_FILE");
-	const char *key_file = getenv("ACE_KEY_FILE");
+	const char *key_file  = getenv("ACE_KEY_FILE");
+	const char *ca_file   = getenv("ACE_CA_FILE");
+	const char *ca_path   = getenv("ACE_CA_PATH");
+	const char *insecure  = getenv("ACE_TLS_INSECURE");
+
 	if (!cert_file || !*cert_file) cert_file = ACE_DEFAULT_CERT_FILE;
-	if (!key_file || !*key_file) key_file = ACE_DEFAULT_KEY_FILE;
-	SSL_CTX *ssl_ctx = SSL_CTX_new(TLS_method());
-	if (!ssl_ctx) {
-		elog("SSL_CTX_new()");
-		return -1;
-	}
-	SSL_CTX_set_min_proto_version(ssl_ctx, TLS1_3_VERSION);
-	SSL_CTX_set_max_proto_version(ssl_ctx, TLS1_3_VERSION);
-	SSL_CTX_set_default_verify_paths(ssl_ctx);
+	if (!key_file  || !*key_file)  key_file  = ACE_DEFAULT_KEY_FILE;
 
-	/* Load self-signed certificate */
-	if (1 != SSL_CTX_use_certificate_file(ssl_ctx, cert_file, SSL_FILETYPE_PEM)) {
-		elog("SSL_CTX_use_certificate_file()");
-		SSL_CTX_free(ssl_ctx);
-		return -1;
-	}
-	if (1 != SSL_CTX_use_PrivateKey_file(ssl_ctx, key_file, SSL_FILETYPE_PEM)) {
-		elog("SSL_CTX_use_PrivateKey_file()");
-		SSL_CTX_free(ssl_ctx);
+	struct tls_ctx_params params = {
+		.mode         = TLS_CTX_MODE_SERVER,
+		.cert_file    = cert_file,
+		.key_file     = key_file,
+		.ca_file      = ca_file,
+		.ca_path      = ca_path,
+		.insecure     = (insecure && !strcmp(insecure, "1")),
+		.alpn         = "main,ace",
+	};
+
+	se->tls = tls_ctx_new(&params);
+	if (!se->tls) {
+		elog("tls_ctx_new() failed for server");
 		return -1;
 	}
 
-	blog("se %p ssl_ctx %p", se, ssl_ctx);
-	se->ssl_ctx = ssl_ctx;
-
+	se->ssl_ctx = tls_ctx_ssl(se->tls);
 	return 0;
 }
 
@@ -588,42 +400,30 @@ int on_new_session(SSL *ssl, SSL_SESSION *session)
 
 static int service_init_ssl_ctx_client(struct service *se)
 {
-	log();
-	// FIXME
-#if 0
-	unsigned char ticket_keys[48] = {0};
-	{
-		srand((unsigned int)(time(NULL)));
-		for (int i = 0; i < sizeof(ticket_keys); i++) {
-			ticket_keys[i] =  rand() % (unsigned char)(-1);
-		}
-	}
-#endif
+	const char *ca_file   = getenv("ACE_CA_FILE");
+	const char *ca_path   = getenv("ACE_CA_PATH");
+	const char *hostname  = getenv("ACE_HOSTNAME");
+	const char *insecure  = getenv("ACE_TLS_INSECURE");
 
-	SSL_CTX *ssl_ctx = SSL_CTX_new(TLS_method());
-	if (!ssl_ctx) {
-		elog("SSL_CTX_new()");
+	struct tls_ctx_params params = {
+		.mode           = TLS_CTX_MODE_CLIENT,
+		.ca_file        = ca_file,
+		.ca_path        = ca_path,
+		.hostname       = hostname,
+		.insecure       = (insecure && !strcmp(insecure, "1")),
+		.alpn           = "main,ace",
+		.keylog_path    = se->config.keylog_path,
+		.session_path   = se->config.session_path,
+		.on_new_session = on_new_session,
+	};
+
+	se->tls = tls_ctx_new(&params);
+	if (!se->tls) {
+		elog("tls_ctx_new() failed for client");
 		return -1;
 	}
-	SSL_CTX_set_min_proto_version(ssl_ctx, TLS1_3_VERSION);
-	SSL_CTX_set_max_proto_version(ssl_ctx, TLS1_3_VERSION);
-	SSL_CTX_set_default_verify_paths(ssl_ctx);
 
-	if (se->config.keylog_path && strlen(se->config.keylog_path) > 0) {
-		unsetenv("SSLSKEYLOG");
-		setenv("SSLSKEYLOG", se->config.keylog_path, 1);
-		SSL_CTX_set_keylog_callback(ssl_ctx, service_keylog_line);
-	}
-
-	if (se->config.session_path && strlen(se->config.session_path) > 0) {
-		SSL_CTX_set_session_cache_mode(ssl_ctx, SSL_SESS_CACHE_CLIENT);
-		SSL_CTX_set_early_data_enabled(ssl_ctx, 1);
-		SSL_CTX_sess_set_new_cb(ssl_ctx, on_new_session);
-	}
-
-	blog("se %p ssl_ctx %p", se, ssl_ctx);
-	se->ssl_ctx = ssl_ctx;
-
+	se->ssl_ctx = tls_ctx_ssl(se->tls);
 	return 0;
 }
 
