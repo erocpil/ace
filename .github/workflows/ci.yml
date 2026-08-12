@@ -47,6 +47,10 @@ jobs:
         run: cmake --build build/ci
       - name: Unit and contract regressions
         run: ctest --test-dir build/ci --output-on-failure
+      - name: TLS identity verification
+        env:
+          ACE_BUILD_DIR: build/ci
+        run: bash scripts/tls-verify-test.sh
 
   sanitizer:
     name: ${{ matrix.sanitizer }} sanitizer
@@ -130,8 +134,16 @@ jobs:
         run: |
           cmake -S . -B build/ci -DCMAKE_BUILD_TYPE=Debug
           cmake --build build/ci
-      - name: Run real QUIC regression
+      - name: QUIC handshake + probe echo regression
         env:
           ACE_BUILD_DIR: build/ci
           ACE_IP_VERSION: ${{ matrix.ip_version }}
         run: bash scripts/smoke-test.sh
+      - name: File transfer (known limitation — non-blocking)
+        if: success() || failure()
+        continue-on-error: true
+        env:
+          ACE_BUILD_DIR: build/ci
+          ACE_IP_VERSION: ${{ matrix.ip_version }}
+          ACE_UPSTREAM_FILE: /tmp/ci-client.sock
+        run: bash scripts/file-transfer-test.sh

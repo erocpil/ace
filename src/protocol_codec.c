@@ -105,10 +105,13 @@ size_t ace_sendfile_nego_encode(unsigned char *buf, size_t bufsz,
 				uint16_t stream_id,
 				const struct ace_sendfile_nego *nego)
 {
+	if (!nego)
+		return 0;
+
 	size_t total = ACE_FRAME_HDR_LEN + ACE_WIRE_SENDFILE_NEGO_LEN +
 		       (size_t)nego->path_len + nego->file_len + nego->type_len;
 
-	if (!buf || bufsz < total || !nego)
+	if (!buf || bufsz < total)
 		return 0;
 
 	unsigned char *p = buf;
@@ -173,6 +176,10 @@ size_t ace_probe_encode(unsigned char *buf, size_t bufsz,
 			const struct ace_probe *probe)
 {
 	if (!probe)
+		return 0;
+
+	/* If probe declares payload, the data pointer must be valid. */
+	if (probe->data_length > 0 && !probe->data)
 		return 0;
 
 	size_t total = ACE_FRAME_HDR_LEN + ACE_WIRE_PROBE_LEN + probe->data_length;

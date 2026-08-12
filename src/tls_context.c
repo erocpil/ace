@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 #include <openssl/err.h>
 #include <openssl/pem.h>
 #include <openssl/x509.h>
@@ -12,10 +13,12 @@
 #include "define.h"
 
 /* ------------------------------------------------------------------ */
-/* Per-SSL_CTX storage via ex_data                                    */
+/* Per-SSL_CTX storage via ex_data (two indices, thread-safe init)    */
 /* ------------------------------------------------------------------ */
 
-static int tls_ctx_ex_data_idx = -1;
+static pthread_once_t tls_ex_data_init_once = PTHREAD_ONCE_INIT;
+static int tls_ctx_ex_data_idx    = -1;   /* stores struct tls_ctx *     */
+static int tls_alpn_ex_data_idx   = -1;   /* stores struct tls_alpn_store* */
 
 /* Lightweight ALPN descriptor stored on SSL_CTX so the select callback
  * can read it without a global table. */
@@ -38,10 +41,33 @@ static void tls_ctx_ex_data_free(void *parent, void *ptr,
 {
 	(void)parent; (void)ad; (void)idx; (void)argl; (void)argp;
 	/* ptr is the struct tls_ctx * stored by SSL_CTX_set_ex_data.
-	 * Do NOT free it here — ownership stays with the caller who
-	 * must call tls_ctx_free().  This callback exists only so
-	 * BoringSSL doesn't complain about a missing destructor. */
+	 * Do NOT free it here — ownership stays with the caller. */
 	(void)ptr;
+}
+
+static void tls_alpn_ex_data_free(void *parent, void *ptr,
+				  CRYPTO_EX_DATA *ad, int idx,
+				  long argl, void *argp)
+{
+	(void)parent; (void)ad; (void)idx; (void)argl; (void)argp;
+	tls_alpn_store_free((struct tls_alpn_store *)ptr);
+}
+
+static void tls_ex_data_init(void)
+{
+	tls_ctx_ex_data_idx = SSL_CTX_get_ex_new_index(
+		0, NULL, NULL, NULL, tls_ctx_ex_data_free);
+	if (tls_ctx_ex_data_idx < 0) {
+		elog("SSL_CTX_get_ex_new_index() for tls_ctx failed");
+		abort();
+	}
+
+	tls_alpn_ex_data_idx = SSL_CTX_get_ex_new_index(
+		0, NULL, NULL, NULL, tls_alpn_ex_data_free);
+	if (tls_alpn_ex_data_idx < 0) {
+		elog("SSL_CTX_get_ex_new_index() for ALPN failed");
+		abort();
+	}
 }
 
 /* ------------------------------------------------------------------ */
@@ -80,15 +106,8 @@ struct tls_ctx *tls_ctx_new(const struct tls_ctx_params *params)
 		return NULL;
 	}
 
-	/* One-time ex_data index registration. */
-	if (tls_ctx_ex_data_idx < 0) {
-		tls_ctx_ex_data_idx = SSL_CTX_get_ex_new_index(
-			0, NULL, NULL, NULL, tls_ctx_ex_data_free);
-		if (tls_ctx_ex_data_idx < 0) {
-			elog("SSL_CTX_get_ex_new_index() failed");
-			return NULL;
-		}
-	}
+	/* Thread-safe one-time ex_data index registration. */
+	pthread_once(&tls_ex_data_init_once, tls_ex_data_init);
 
 	ctx = calloc(1, sizeof(*ctx));
 	if (!ctx)
@@ -136,28 +155,38 @@ struct tls_ctx *tls_ctx_new(const struct tls_ctx_params *params)
 
 	/* ---- CA / verification ---- */
 	if (params->insecure) {
+		/* Explicit insecure: no verification. */
 		ctx->verify_enabled = 0;
 		blog("TLS verify disabled (insecure mode)");
-	} else if (params->mode == TLS_CTX_MODE_CLIENT &&
-		   (params->ca_file || params->ca_path)) {
-		/* Client verifies the server certificate. */
-		if (1 != SSL_CTX_load_verify_locations(
-				ctx->ssl_ctx,
-				params->ca_file,
-				params->ca_path)) {
-			elog("SSL_CTX_load_verify_locations() failed");
-			goto fail;
+	} else if (params->mode == TLS_CTX_MODE_CLIENT) {
+		/* Client always enables peer verification unless insecure.
+		 * Load explicit CA if given, and always try system defaults
+		 * so it works out of the box on systems with a CA bundle. */
+		if (params->ca_file || params->ca_path) {
+			if (1 != SSL_CTX_load_verify_locations(
+					ctx->ssl_ctx,
+					params->ca_file,
+					params->ca_path)) {
+				elog("SSL_CTX_load_verify_locations() failed");
+				goto fail;
+			}
 		}
+		/* Also load system trust store — no-op if none exists. */
 		SSL_CTX_set_default_verify_paths(ctx->ssl_ctx);
 		SSL_CTX_set_verify(ctx->ssl_ctx,
 				   SSL_VERIFY_PEER |
 				   SSL_VERIFY_FAIL_IF_NO_PEER_CERT,
 				   tls_ctx_verify_callback);
 		ctx->verify_enabled = 1;
-		blog("TLS peer verification enabled");
+		blog("TLS peer verification enabled"
+		     " (ca_file=%s ca_path=%s hostname=%s)",
+		     params->ca_file ? params->ca_file : "(system)",
+		     params->ca_path ? params->ca_path : "(system)",
+		     params->hostname ? params->hostname : "(not set)");
 	} else {
+		/* Server mode: do not verify client certificates (mTLS not
+		 * yet implemented). */
 		ctx->verify_enabled = 0;
-		blog("TLS peer verification disabled (no CA configured)");
 	}
 
 	/* Store hostname for the verify callback (client only). */
@@ -174,7 +203,7 @@ struct tls_ctx *tls_ctx_new(const struct tls_ctx_params *params)
 		alpn_store = tls_alpn_build(params->alpn);
 		if (alpn_store) {
 			SSL_CTX_set_ex_data(ctx->ssl_ctx,
-					    tls_ctx_ex_data_idx + 1,
+					    tls_alpn_ex_data_idx,
 					    alpn_store);
 			if (params->mode == TLS_CTX_MODE_CLIENT) {
 				SSL_CTX_set_alpn_protos(ctx->ssl_ctx,
@@ -238,7 +267,7 @@ void tls_ctx_free(struct tls_ctx *ctx)
 
 	if (ctx->ssl_ctx) {
 		alpn = SSL_CTX_get_ex_data(ctx->ssl_ctx,
-					   tls_ctx_ex_data_idx + 1);
+					   tls_alpn_ex_data_idx);
 		tls_alpn_store_free(alpn);
 		SSL_CTX_free(ctx->ssl_ctx);
 	}
@@ -258,7 +287,7 @@ static int tls_ctx_verify_callback(int preverify_ok,
 	int     depth = X509_STORE_CTX_get_error_depth(store_ctx);
 	int     err   = X509_STORE_CTX_get_error(store_ctx);
 	SSL    *ssl   = X509_STORE_CTX_get_ex_data(store_ctx,
-					SSL_get_ex_data_X509_STORE_CTX_idx());
+			SSL_get_ex_data_X509_STORE_CTX_idx());
 
 	blog("tls_verify: preverify=%d depth=%d err=%d:%s",
 	     preverify_ok, depth, err,
@@ -347,15 +376,20 @@ static int tls_ctx_alpn_select(SSL *ssl, const unsigned char **out,
 	(void)arg;
 	SSL_CTX *ssl_ctx = SSL_get_SSL_CTX(ssl);
 	struct tls_alpn_store *alpn = ssl_ctx
-		? SSL_CTX_get_ex_data(ssl_ctx, tls_ctx_ex_data_idx + 1)
+		? SSL_CTX_get_ex_data(ssl_ctx, tls_alpn_ex_data_idx)
 		: NULL;
 
 	if (!alpn || alpn->protos_len == 0) {
-		/* No ALPN configured — use client's first offer. */
+		/* No ALPN configured on server — use client's first offer. */
+		if (inlen == 0)
+			return SSL_TLSEXT_ERR_ALERT_FATAL;
 		*out    = in + 1;
 		*outlen = in[0];
 		return SSL_TLSEXT_ERR_OK;
 	}
+
+	if (inlen == 0)
+		return SSL_TLSEXT_ERR_ALERT_FATAL;
 
 	int r = SSL_select_next_proto((unsigned char **)out, outlen,
 				       alpn->protos, alpn->protos_len,
@@ -366,11 +400,11 @@ static int tls_ctx_alpn_select(SSL *ssl, const unsigned char **out,
 		return SSL_TLSEXT_ERR_OK;
 	}
 
-	/* No overlap — fall back to client's first offer so handshakes
-	 * don't fail hard. */
-	*out    = in + 1;
-	*outlen = in[0];
-	return SSL_TLSEXT_ERR_OK;
+	/* No overlap — reject the handshake.  Accepting an unknown
+	 * protocol defeats the purpose of ALPN. */
+	elog("ALPN mismatch: server wants '%.*s', client offered %u bytes",
+	     (int)alpn->protos_len, (const char *)alpn->protos, inlen);
+	return SSL_TLSEXT_ERR_ALERT_FATAL;
 }
 
 /* ------------------------------------------------------------------ */
