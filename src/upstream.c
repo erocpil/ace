@@ -746,17 +746,8 @@ static void upstream_read_char(struct ev_loop *loop, struct ev_io *watcher, int 
 			if (!out)
 				continue;   /* empty line, already consumed */
 
-			/* best-effort echo of the raw command line */
-			size_t echo_len = consumed;
-			while (echo_len > 0 &&
-			       (head[line_start + echo_len - 1] == '\n' ||
-			        head[line_start + echo_len - 1] == '\r'))
-				echo_len--;
-			if (write(fd, head + line_start, echo_len) < 0)
-				eslog("write(%d %zu)", fd, echo_len);
-			else
-				ylog("write(%d %zu)", fd, echo_len);
-
+			/* enqueue first, then run the rx callback — on failure the
+			 * client must NOT get a success-looking echo back. */
 			if (upstream_echo_add_rq_external(echo, out) != 0) {
 				skb_free(out);
 				goto ERROR;
@@ -767,6 +758,17 @@ static void upstream_read_char(struct ev_loop *loop, struct ev_io *watcher, int 
 				elog("upstream_call_rx_process_func()");
 				return;
 			}
+
+			/* best-effort echo of the raw command line */
+			size_t echo_len = consumed;
+			while (echo_len > 0 &&
+			       (head[line_start + echo_len - 1] == '\n' ||
+			        head[line_start + echo_len - 1] == '\r'))
+				echo_len--;
+			if (write(fd, head + line_start, echo_len) < 0)
+				eslog("write(%d %zu)", fd, echo_len);
+			else
+				ylog("write(%d %zu)", fd, echo_len);
 		}
 
 		/* shift any leftover partial line to the front of the buffer */
