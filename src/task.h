@@ -115,20 +115,6 @@ static inline void task_exit(struct task *task)
 		task->start, task->end, c);
 }
 
-struct perf_subtask{
-	struct subtask sub;
-	void *data;
-	size_t length;
-	size_t offset;
-};
-
-struct perf_task {
-	/* thie element must be the first */
-	struct task task;
-	struct ace_perf_nego *nego;
-	struct perf_subtask pfst[0];
-};
-
 static int task_find_type(const char *c)
 {
 	clog("task_type_num %d", task_type_num);
@@ -163,14 +149,5 @@ void task_add_sub(struct task *t, struct subtask *s);
 struct task *task_create(struct sk_buff *skb, int role);
 struct subtask *task_get_sub_at(struct task *t, unsigned short int n);
 struct subtask *task_get_sub_next(struct task *t);
-
-int perf_init(struct task *task);
-int perf_nego(struct task *task, struct sk_buff* skb);
-struct sk_buff *perf_exit(struct task *task);
-ssize_t perf_ctrl_rx(struct lsquic_stream_ctx *sc);
-ssize_t perf_ctrl_tx(struct lsquic_stream_ctx *sc);
-ssize_t perf_rx(struct lsquic_stream_ctx *sc);
-ssize_t perf_tx(struct lsquic_stream_ctx *sc);
-int perf_done(struct lsquic_stream_ctx *sc);
 
 #endif
