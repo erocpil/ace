@@ -427,6 +427,12 @@ void server_on_conn_closed(lsquic_conn_t *conn)
 		task->exit(task);
 	}
 
+	/* stream 0 may never have been established: free its pending ctx */
+	if (lconn_ctx->pending) {
+		service_stream_ctx_free(lconn_ctx->pending);
+		lconn_ctx->pending = NULL;
+	}
+
 	lsquic_conn_set_ctx(conn, NULL);
 	free(lconn_ctx);
 }

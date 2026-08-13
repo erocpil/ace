@@ -99,6 +99,12 @@ void service_stream_ctx_free(struct lsquic_stream_ctx *sc)
 	}
 	sc->tx = NULL;
 
+	/* Unlink from the connection's running/pending stream list, if linked.
+	 * Stream 0 is never on a list; data streams are added in on_new_stream
+	 * and would otherwise leave a dangling node behind after free. */
+	if (!list_empty(&sc->stream_node))
+		list_del_init(&sc->stream_node);
+
 	/* P3: release stream ctx charge from connection budget */
 	struct ace_mem_budget *conn_budget = sc->mem_budget.parent;
 
