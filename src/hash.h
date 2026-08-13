@@ -505,6 +505,7 @@ static unsigned int ace_hash_count(struct ace_hash *h)
 	}
 	// printf("count %u\n", c);
 	assert(c == h->n_elem_all);
+	(void)c;  /* consumed by the assert only; NDEBUG drops it */
 
 	return h->n_elem_all;
 }
