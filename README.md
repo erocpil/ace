@@ -12,7 +12,8 @@ The current implementation provides:
 - automatic client-to-server QUIC connection establishment;
 - TLS handshake and session resumption;
 - bidirectional control streams and concurrent data streams;
-- multi-stream file transfer with bounded frame, queue, stream, and file sizes;
+- multi-stream file transfer with bounded frame, queue, stream, and file sizes, plus
+  crash-safe resume from partially received segments;
 - IPv4 and IPv6 socket, packet-info, ECN, and address handling;
 - partial-I/O, retry, backpressure, and UDP zerocopy fallback handling;
 - signal-driven shutdown with joined service threads;
@@ -181,7 +182,7 @@ Received files are confined to the `received/` directory.
 ace/
 ├── .github/workflows/ci.yml   # GCC/Clang, sanitizer, fuzz, IPv4/IPv6 CI
 ├── CMakePresets.json          # Debug, Release, sanitizer, and fuzz presets
-├── docs/                      # Engineering roadmap
+├── docs/                      # Protocol spec and engineering roadmap
 ├── include/                   # Version-matched dependency headers
 ├── lib/                       # Architecture-specific static dependencies
 ├── scripts/
