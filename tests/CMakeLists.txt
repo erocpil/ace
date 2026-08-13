@@ -109,6 +109,15 @@ target_link_libraries(test_task_perf PRIVATE
 	-Wl,--start-group liblsquic.a libssl.a libcrypto.a -Wl,--end-group libmagic.so liblzma.so pthread z m)
 add_test(NAME task_perf COMMAND test_task_perf)
 
+add_executable(test_task_dispatch
+	test_task_dispatch.c ${PROJECT_SOURCE_DIR}/src/task_dispatch.c ${PROJECT_SOURCE_DIR}/src/task_sendfile.c ${PROJECT_SOURCE_DIR}/src/task_perf.c ${PROJECT_SOURCE_DIR}/src/protocol_codec.c ${PROJECT_SOURCE_DIR}/src/mem_budget.c)
+target_include_directories(test_task_dispatch PRIVATE
+	${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/include/lsquic ${CMAKE_BINARY_DIR}/generated)
+target_compile_options(test_task_dispatch PRIVATE -Wall -Wextra -Werror -Wno-unused-function -UNDEBUG)
+target_link_libraries(test_task_dispatch PRIVATE
+	-Wl,--start-group liblsquic.a libssl.a libcrypto.a -Wl,--end-group libmagic.so liblzma.so pthread z m)
+add_test(NAME task_dispatch COMMAND test_task_dispatch)
+
 add_test(
 	NAME build_deps_version_selection
 	COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/check-build-deps.sh

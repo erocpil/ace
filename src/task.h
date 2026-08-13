@@ -146,8 +146,5 @@ static int task_find_type(const char *c)
 	} while (0)
 
 void task_add_sub(struct task *t, struct subtask *s);
-struct task *task_create(struct sk_buff *skb, int role);
-struct subtask *task_get_sub_at(struct task *t, unsigned short int n);
-struct subtask *task_get_sub_next(struct task *t);
 
 #endif

@@ -1,4 +1,5 @@
 #include <assert.h>
+#include "task_dispatch.h"
 #include "task.h"
 #include "task_sendfile.h"
 #include "task_perf.h"
@@ -15,18 +16,19 @@ struct task* (*task_create_entity_func[TASK_TYPE_MAX])(unsigned short) = {
 struct task *task_create(struct sk_buff *skb, int role)
 {
 	struct upstream_skb_head validated;
-	struct upstream_skb_head *head;
 
 	if (!skb || role < 0 || role >= TASK_ROLE_MAX ||
 			task_frame_validate(skb->head, skb->len, &validated) != 1) {
 		return NULL;
 	}
-	head = (struct upstream_skb_head*)skb->head;
 
-	int type = head->theme;
-	int num = 0;
+	/* Read the decoded frame descriptor, not the raw wire bytes: the wire
+	 * header is struct ace_frame (14 bytes), while struct upstream_skb_head
+	 * is a native bookkeeping struct.  Reading theme/serial off the wire
+	 * buffer with the native layout yields garbage and rejects every frame. */
+	int type = validated.theme;
 	/* including stream(0) */
-	num = head->serial + 1;
+	int num = validated.serial + 1;
 	if (type >= TASK_TYPE_MAX) {
 		return NULL;
 	}
@@ -42,7 +44,7 @@ struct task *task_create(struct sk_buff *skb, int role)
 	task->role = role;
 	task->type = type;
 	task->n_sub = num;
-	task->data = (void*)head;
+	task->data = (void*)skb->head;
 	task->start = rdtsc();
 	hplog("task %p start %lu", task, task->start);
 

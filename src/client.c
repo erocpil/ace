@@ -1,5 +1,6 @@
 #include "client.h"
 #include "task.h"
+#include "task_dispatch.h"
 #include "link.h"
 #include "runner.h"
 

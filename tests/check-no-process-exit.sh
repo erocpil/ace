@@ -4,7 +4,7 @@ set -eu
 root=${1:-.}
 status=0
 
-for source in ace.c client.c server.c service.c task.c connote.c upstream.c; do
+for source in ace.c client.c server.c service.c task_dispatch.c task_sendfile.c task_perf.c connote.c upstream.c; do
 	if grep -En '(^|[^>.[:alnum:]_])exit[[:space:]]*\(' "$root/src/$source"; then
 		status=1
 	fi
