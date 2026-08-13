@@ -86,6 +86,11 @@ target_link_libraries(test_tls_identity PRIVATE
 	-Wl,--start-group libssl.a libcrypto.a -Wl,--end-group pthread z m)
 add_test(NAME tls_identity COMMAND test_tls_identity)
 
+add_executable(test_protocol_types test_protocol_types.c)
+target_include_directories(test_protocol_types PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_options(test_protocol_types PRIVATE -Wall -Wextra -Werror -Wno-unused-function -UNDEBUG)
+add_test(NAME protocol_types COMMAND test_protocol_types)
+
 add_test(
 	NAME build_deps_version_selection
 	COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/check-build-deps.sh
