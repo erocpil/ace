@@ -111,17 +111,18 @@ int ace_probe_decode(const unsigned char *buf, size_t buflen,
 		     struct ace_probe *out);
 
 /* Encode frame + sendfile nego into a pre-allocated buffer.
- * Returns total encoded length, or 0 on overflow. */
+ * A NULL buffer performs a dry-run and returns the required size.
+ * Returns total encoded length, or 0 on invalid input/overflow. */
 size_t ace_sendfile_nego_encode(unsigned char *buf, size_t bufsz,
 				uint16_t stream_id,
 				const struct ace_sendfile_nego *nego);
 
-/* Encode frame + perf nego. */
+/* Encode frame + perf nego.  A NULL buffer performs a dry-run. */
 size_t ace_perf_nego_encode(unsigned char *buf, size_t bufsz,
 			    uint16_t stream_id,
 			    const struct ace_perf_nego *nego);
 
-/* Encode frame + probe. */
+/* Encode frame + probe.  A NULL buffer performs a dry-run. */
 size_t ace_probe_encode(unsigned char *buf, size_t bufsz,
 			uint16_t stream_id,
 			const struct ace_probe *probe);

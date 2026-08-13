@@ -111,7 +111,11 @@ size_t ace_sendfile_nego_encode(unsigned char *buf, size_t bufsz,
 	size_t total = ACE_FRAME_HDR_LEN + ACE_WIRE_SENDFILE_NEGO_LEN +
 		       (size_t)nego->path_len + nego->file_len + nego->type_len;
 
-	if (!buf || bufsz < total)
+	/* buf==NULL is a dry-run: return required size without writing. */
+	if (!buf)
+		return total;
+
+	if (bufsz < total)
 		return 0;
 
 	unsigned char *p = buf;
@@ -148,9 +152,16 @@ size_t ace_perf_nego_encode(unsigned char *buf, size_t bufsz,
 			    uint16_t stream_id,
 			    const struct ace_perf_nego *nego)
 {
+	if (!nego)
+		return 0;
+
 	size_t total = ACE_FRAME_HDR_LEN + ACE_WIRE_PERF_NEGO_LEN;
 
-	if (!buf || bufsz < total || !nego)
+	/* buf==NULL is a dry-run: return required size without writing. */
+	if (!buf)
+		return total;
+
+	if (bufsz < total)
 		return 0;
 
 	unsigned char *p = buf;

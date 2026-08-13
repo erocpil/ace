@@ -68,14 +68,23 @@ int main(void)
 		.file_length = 42,
 	};
 	size_t sfn_total = ACE_FRAME_HDR_LEN + ACE_WIRE_SENDFILE_NEGO_LEN + 6 + 3 + 3;
+	assert(ace_sendfile_nego_encode(NULL, 0, 0, &sfn) == sfn_total);
 	assert(ace_sendfile_nego_encode(probe_buf, sfn_total - 1, 0, &sfn) == 0);
 	assert(ace_sendfile_nego_encode(probe_buf, sfn_total, 0, &sfn) == sfn_total);
 
-	/* ---- 8. Frame magic/version rejection ---- */
+	/* ---- 8. perf dry-run and buffer sizing ---- */
+	struct ace_perf_nego pfn = { .code = 1, .dual = 1 };
+	size_t pfn_total = ACE_FRAME_HDR_LEN + ACE_WIRE_PERF_NEGO_LEN;
+	assert(ace_perf_nego_encode(NULL, 0, 0, &pfn) == pfn_total);
+	assert(ace_perf_nego_encode(probe_buf, pfn_total - 1, 0, &pfn) == 0);
+	assert(ace_perf_nego_encode(probe_buf, pfn_total, 0, &pfn) == pfn_total);
+	assert(ace_perf_nego_encode(probe_buf, sizeof(probe_buf), 0, NULL) == 0);
+
+	/* ---- 9. Frame magic/version rejection ---- */
 	unsigned char bad_magic[4] = {0x41, 0x43, 0x45, 0x02}; /* version 2 */
 	assert(ace_frame_decode(bad_magic, 4, &f) == -1);
 
-	/* ---- 9. Frame too short ---- */
+	/* ---- 10. Frame too short ---- */
 	unsigned char short_buf[ACE_FRAME_HDR_LEN - 1];
 	memset(short_buf, 0, sizeof(short_buf));
 	assert(ace_frame_decode(short_buf, sizeof(short_buf), &f) == -1);

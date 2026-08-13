@@ -72,7 +72,19 @@ int main(void)
 	sft->file = "a.txt";
 	sft->length = 1;
 
-	struct sk_buff *small = skb_malloc(1);
+	struct ace_sendfile_nego expected = {
+		.code = 0,
+		.path = sft->path,
+		.path_len = (uint16_t)(strlen(sft->path) + 1),
+		.file = sft->file,
+		.file_len = (uint16_t)(strlen(sft->file) + 1),
+		.type = sft->type,
+		.type_len = (uint16_t)(strlen(sft->type) + 1),
+		.file_length = (uint32_t)sft->length,
+	};
+	size_t total = ace_sendfile_nego_encode(NULL, 0, head.serial, &expected);
+	assert(total > 1);
+	struct sk_buff *small = skb_malloc((ssize_t)(total - 1));
 	assert(small != NULL);
 	assert(sendfile_nego(t, small) == -1);
 	assert(sft->nego == NULL);
