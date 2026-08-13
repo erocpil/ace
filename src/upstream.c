@@ -2,6 +2,8 @@
 #include "sk_buff.h"
 #include "upstream.h"
 #include "task.h"
+#include "control_socket.h"
+#include "control_command.h"
 
 inline int upstream_echo_add_rq(struct upstream_echo *echo, struct sk_buff *skb)
 {
@@ -168,39 +170,6 @@ int upstream_socket_connect(char *ipaddr, unsigned short int port)
 	return fd;
 }
 
-static int upstream_socket_un_create(const char *file)
-{
-	struct sockaddr_un sun;
-
-	if (!file || strlen(file) + 1 > sizeof(sun.sun_path)) {
-		errno = EINVAL;
-		return -1;
-	}
-
-	int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (fd < 0) {
-		return -1;
-	}
-
-	if (!access((const char*)file, F_OK)) {
-		ylog("unlink %s", file);
-		if (-1 == unlink((const char*)file)) {
-			return -1;
-		}
-	}
-
-	memset(&sun, 0, sizeof(sun));
-	sun.sun_family = AF_UNIX;
-	strncpy(sun.sun_path, file, sizeof(sun.sun_path) - 1);
-	// FIXME
-	// int size = offsetof(struct sockaddr_un, sun_path) + strlen(sun.sun_path);
-	if (bind(fd, (struct sockaddr*)&sun, sizeof(sun)) < 0) {
-		return -1;
-	}
-
-	return fd;
-}
-
 void upstream_destroy_echo(struct upstream_echo *echo)
 {
 	if (!echo) {
@@ -284,7 +253,7 @@ static int upstream_create_socket(struct upstream *up)
 	if (upstream_is_simple(up)) {
 		fd = upstream_socket_create(NULL, 9999);
 	} else {
-		fd = upstream_socket_un_create(up->file);
+		fd = control_socket_un_create(up->file);
 	}
 	if (fd < 0) {
 		return -1;
@@ -347,7 +316,7 @@ static void upstream_accept(struct ev_loop *loop,
 		return;
 	}
 
-	int sock = accept(fd, (struct sockaddr*)&client_addr, &len);
+	int sock = control_socket_accept(fd, (struct sockaddr*)&client_addr, &len);
 	if (-1 == sock) {
 		eslog("accept(%d)", fd);
 		return;
@@ -756,93 +725,59 @@ static void upstream_read_char(struct ev_loop *loop, struct ev_io *watcher, int 
 	n = read(fd, head + *offset, end - *offset);
 	if (n > 0) {
 		*offset += n;
-		unsigned char *p1 = head;
-		unsigned char *p2 = head;
-		while (p2 < head + *offset) {
-			if (*p2 == 0x0d || *p2 == 0x0a) {
-				*p2 = 0;
-			}
-			if (*p2 == 0) {
-				if (strlen((char*)p1)) {
-					ylog("read(%d %lu \"%s\")", fd, p2 - p1, p1);
-#if 1
-					char *p3 = strstr((char*)p1, " ");
-					if (!p3) {
-						rlog("TODO");
-					}
-					*p3 = '\0';
-					int type = task_find_type((char*)p1);
-					if (-1 == type) {
-						elog("invalid command %s", p1);
-						goto ERROR;
-					}
-					clog("type %d", type);
-					*p3 = ' ';
-					p3++;
-#endif
 
-					char *p4 = strstr(p3, " ");
-					p4++;
-					/* including trailing '\0' */
-					unsigned int len = p2 - (unsigned char*)p4 + 1;
-					// rlog("len %d", len);
-					struct sk_buff *skb =
-						skb_malloc(sizeof(struct upstream_skb_head) + len);
-					skb_reserve(skb, sizeof(struct upstream_skb_head));
-					skb_put(skb, len);
-					/* make the cmd */
-					struct upstream_skb_head *head =
-						(struct upstream_skb_head*)skb->head;
-					/* string from telnet */
-					head->length = len;
-					/* 0: sendfile */
-					head->theme = type;
-					/* use 3 streams */
-					head->serial = atoi(p3);
-					rlog("serial %u", head->serial);
-					memcpy(skb->data, p4, len);
-					if (!skb_push(skb, sizeof(*head))) {
-						skb_free(skb);
-						goto ERROR;
-					}
-					log("%p %u %u %u", head, head->length, head->theme, head->serial);
-						if (upstream_echo_add_rq_external(echo, skb) != 0) {
-							skb_free(skb);
-							goto ERROR;
-						}
-					/* TODO register write event to echo back */
-					// ev_io_modify(watcher, EV_WRITE);
-					if (upstream_call_rx_process_func(echo) < 0) {
-						upstream_echo_delete(echo);
-						close(fd);
-						elog("upstream_call_rx_process_func()");
-						return;
-					}
-#if 1
-					if (write(fd, p1, p2 - p1) < 0) {
-						eslog("write(%d %u \"%s\")", fd, len, p1);
-					} else {
-						ylog("write(%d %u \"%s\")", fd, len, p1);
-					}
-#endif
-				}
-				p1 = p2 + 1;
+		size_t off = 0;
+		while (off < *offset) {
+			size_t consumed = 0;
+			size_t line_start = off;
+			struct sk_buff *out = NULL;
+			enum control_parse_status st = control_command_parse(
+				head + off, *offset - off, &consumed, &out);
+
+			if (st == CONTROL_PARSE_INCOMPLETE)
+				break;   /* need more bytes for a full line */
+
+			off += consumed;
+			if (st == CONTROL_PARSE_INVALID) {
+				elog("invalid control command");
+				goto ERROR;
 			}
-			p2++;
+
+			if (!out)
+				continue;   /* empty line, already consumed */
+
+			/* best-effort echo of the raw command line */
+			size_t echo_len = consumed;
+			while (echo_len > 0 &&
+			       (head[line_start + echo_len - 1] == '\n' ||
+			        head[line_start + echo_len - 1] == '\r'))
+				echo_len--;
+			if (write(fd, head + line_start, echo_len) < 0)
+				eslog("write(%d %zu)", fd, echo_len);
+			else
+				ylog("write(%d %zu)", fd, echo_len);
+
+			if (upstream_echo_add_rq_external(echo, out) != 0) {
+				skb_free(out);
+				goto ERROR;
+			}
+			if (upstream_call_rx_process_func(echo) < 0) {
+				upstream_echo_delete(echo);
+				close(fd);
+				elog("upstream_call_rx_process_func()");
+				return;
+			}
 		}
-		if (p1 == head) {
-			;
-		} else if (p1 == head + *offset - 1) {
+
+		/* shift any leftover partial line to the front of the buffer */
+		if (off < *offset) {
+			size_t leftover = *offset - off;
+			memmove(head, head + off, leftover);
+			*offset = leftover;
+		} else {
 			*offset = 0;
-		} else if (p1 > head) {
-			*offset = head + *offset - p1;
-			memcpy(head, p1, *offset);
 		}
 
-		if (*offset == end) {
-			rlog("message too long");
-			goto ERROR;
-		}
 		return;
 	} else if (!n) {
 		eslog("read(%d 0), close", fd);
@@ -925,10 +860,17 @@ static void upstream_write_char(struct ev_loop *loop, struct ev_io *watcher, int
 	}
 
 	p = (unsigned char*)(skb->head) + sizeof(*head);
-	sprintf((char*)p, "\n%u %u %u\n", head->length, head->theme, head->serial);
+	{
+		size_t written = 0;
+		if (control_response_encode(skb, p, skb->end - sizeof(*head),
+					    &written) != 0) {
+			eslog("control_response_encode()");
+			goto ERROR;
+		}
+		skb->len = (unsigned int)written;
+	}
 	skb->data = p;
 	skb->offset = 0;
-	skb->len = strlen((char*)p) + 1;
 	n = write(fd, skb->data + skb->offset, skb->len - skb->offset);
 	if (likely(n > 0)) {
 		skb->offset += n;
