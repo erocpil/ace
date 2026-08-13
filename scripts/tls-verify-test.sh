@@ -20,8 +20,8 @@ cleanup() {
 trap cleanup EXIT
 
 ACE_BUILD_DIR=${ACE_BUILD_DIR:-build}
-CLIENT_BIN="./${ACE_BUILD_DIR}/src/ace"
-SERVER_BIN="./${ACE_BUILD_DIR}/src/ace"
+CLIENT_BIN="${ACE_BUILD_DIR}/src/ace"
+SERVER_BIN="${ACE_BUILD_DIR}/src/ace"
 
 # ---- Generate CA ----
 openssl genrsa -out /tmp/test-ca.key 2048 2>/dev/null

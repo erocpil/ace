@@ -18,7 +18,7 @@ fail() { printf "${RED}[FAIL]${RESET} %s\n" "$*"; exit 1; }
 info() { printf "${CYAN}[INFO]${RESET} %s\n" "$*"; }
 
 ACE_BUILD_DIR=${ACE_BUILD_DIR:-build}
-BIN="./${ACE_BUILD_DIR}/src/ace"
+BIN="${ACE_BUILD_DIR}/src/ace"
 
 # temp directories
 CERT_DIR=$(mktemp -d /tmp/ace-iso-cert.XXXXXX)
