@@ -109,7 +109,8 @@ add_test(
 	NAME tls_identity_verification
 	COMMAND bash ${PROJECT_SOURCE_DIR}/scripts/tls-verify-test.sh)
 set_tests_properties(tls_identity_verification PROPERTIES
-	ENVIRONMENT "ACE_BUILD_DIR=${CMAKE_BINARY_DIR}")
+	ENVIRONMENT "ACE_BUILD_DIR=${CMAKE_BINARY_DIR}"
+	LABELS integration)
 
 add_test(
 	NAME queue_saturation_contract
@@ -125,7 +126,8 @@ add_test(
 	NAME connection_isolation
 	COMMAND bash ${PROJECT_SOURCE_DIR}/scripts/connection-isolation-test.sh)
 set_tests_properties(connection_isolation PROPERTIES
-	ENVIRONMENT "ACE_BUILD_DIR=${CMAKE_BINARY_DIR}")
+	ENVIRONMENT "ACE_BUILD_DIR=${CMAKE_BINARY_DIR}"
+	LABELS integration)
 
 if(ACE_BUILD_FUZZERS)
 	if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
