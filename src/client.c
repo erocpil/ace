@@ -320,6 +320,7 @@ static int client_process_upstream_read(struct upstream_echo *echo)
 
 		if (-1 == task->init(task)) {
 			elog("task->init() failed, skipping");
+			task->exit(task);
 			skb_free(skb);
 			continue;
 		}
@@ -337,6 +338,7 @@ static int client_process_upstream_read(struct upstream_echo *echo)
 		/* prepare negotiation info */
 		if (-1 == task->nego(task, sc->tx)) {
 			elog("task->nego() failed, skipping");
+			task->exit(task);
 			skb_free(skb);
 			continue;
 		}

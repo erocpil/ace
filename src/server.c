@@ -74,12 +74,14 @@ ssize_t s0_rx_func(struct lsquic_stream_ctx *sc)
 			/* parse negotiation info */
 			if (-1 == task->nego(task, skb)) {
 				elog("task->nego() failed, aborting stream");
+				task->exit(task);
 				return -1;
 			}
 			SKB_DUMP(skb);
 
 			if (-1 == task->init(task)) {
 				elog("task->init() failed, aborting stream");
+				task->exit(task);
 				return -1;
 			}
 			SKB_DUMP(skb);
