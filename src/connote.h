@@ -1,6 +1,10 @@
 #ifndef __CONNOTE_H__
 #define __CONNOTE_H__
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <stdlib.h>
 #include <unistd.h>
 #include <netinet/in.h>
@@ -52,8 +56,6 @@ static inline int set_nonblocking(int fd)
 }
 
 struct connote *connote_init(struct co_config *cc);
-int connote_init_server(struct connote *ce);
-int connote_init_client(struct connote *ce);
 void connote_free(struct connote *ce);
 
 #endif

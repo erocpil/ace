@@ -205,10 +205,6 @@ static size_t service_del_client_conn(struct service *se, struct lsquic_conn_ctx
 }
 
 struct service *service_init(struct config *config);
-int service_packets_out(void *packets_out_ctx,
-		const struct lsquic_out_spec *out_spec,
-		unsigned int n_packets_out);
-void service_packets_in(struct connote *ce);
 void service_add_connote(struct service *se, struct connote *ce);
 void service_del_connote(struct connote *ce);
 void *service_func(void *arg);

@@ -3,7 +3,6 @@
 #include <sys/types.h>
 #include "service.h"
 #include "task.h"
-#include "udp_send.h"
 #include "io_retry.h"
 #include "net_addr.h"
 #include "quic_engine.h"
@@ -345,129 +344,6 @@ struct lsquic_conn *service_connect(struct connote *ce)
 	se->process(*(struct ev_loop **)se->loop, se);
 
 	return lconn;
-}
-
-int service_packets_out(void *packets_out_ctx,
-		const struct lsquic_out_spec *out_spec,
-		unsigned int n_packets_out)
-{
-	unsigned int n_orig = n_packets_out;
-	struct service *se = (struct service*)packets_out_ctx;
-	size_t out_limit = se->config.out_limit;
-	struct msghdr msg = {
-		.msg_flags = 0,
-		.msg_control = NULL,
-		.msg_controllen = 0,
-	};
-
-	size_t n = 0;
-
-	// TODO cmsg(3)
-
-	if (!n_packets_out) {
-		return 0;
-	}
-
-#if 0
-	if (out_limit > n_packets_out) {
-		out_limit = n_packets_out;
-	}
-#else
-	out_limit = n_packets_out;
-#endif
-
-	do {
-		struct connote *ce = (struct connote*)out_spec[n].peer_ctx;
-		msg.msg_name = (void*)out_spec[n].dest_sa;
-		msg.msg_namelen = ace_sockaddr_len(out_spec[n].dest_sa);
-		if (msg.msg_namelen == 0) {
-			errno = EAFNOSUPPORT;
-			break;
-		}
-		msg.msg_iov = out_spec[n].iov;
-		msg.msg_iovlen = out_spec[n].iovlen;
-		msg.msg_flags = 0;
-		// TODO send unsent
-		// TODO LSQUIC_PREFERRED_ADDR
-		// TODO cmsg, ecn
-		// if server
-		if (ace_udp_sendmsg(ce->fd, &msg, sendmsg) < 0) {
-			if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-				eslog("sendmsg(%d %lu)", ce->fd, msg.msg_iovlen);
-			}
-			break;
-		} else {
-			// log("sendmsg(%d #%lu)", ce->fd, n);
-		}
-	} while (++n < out_limit);
-
-	if (n > 0) {
-		return n;
-	}
-
-	return -1;
-}
-
-void service_packets_in(struct connote *ce)
-{
-	int ecn = 0;
-	ssize_t nread = 0;
-	struct sockaddr_storage peer_sas;
-	struct sockaddr_storage local_sas;
-	// TODO buffer size
-	unsigned char buf[0x1000] = { 0 };
-	// struct connote *ce = (struct connote*)w->data;
-	struct service *se = ce->service;
-
-	struct iovec vec[1] = {{ buf, sizeof(buf) }};
-	unsigned char ctl_buf[CTL_SZ];
-	struct msghdr msg = {
-		.msg_name       = &peer_sas,
-		.msg_namelen    = sizeof(peer_sas),
-		.msg_iov        = vec,
-		.msg_iovlen     = 1,
-		.msg_control    = ctl_buf,
-		.msg_controllen = sizeof(ctl_buf),
-		.msg_flags = 0,
-	};
-	nread = recvmsg(ce->fd, &msg, 0);
-	// ylog("nread %ld", nread);
-	if (-1 == nread) {
-		if (!(EAGAIN == errno || EWOULDBLOCK == errno)) {
-			hpeslog("recvmsg(%d)", ce->fd);
-		}
-		return;
-	}
-	// FIXME
-	memcpy(&local_sas, &ce->local_addr, sizeof(local_sas));
-	ecn = 0;
-
-	ace_parse_ancillary(&msg, &local_sas, &ecn);
-
-	int n = lsquic_engine_packet_in(
-			ce->service->engine, buf, nread,
-			(struct sockaddr*)&local_sas,
-			(struct sockaddr*)&peer_sas,
-			(void *)ce, ecn);
-#if 0
-	log("local_sas %s:%u", inet_ntoa(((struct sockaddr_in*)&local_sas)->sin_addr), ntohs(((struct sockaddr_in*)&local_sas)->sin_port));
-	log("peer_sas %s:%u", inet_ntoa(((struct sockaddr_in*)&peer_sas)->sin_addr), ntohs(((struct sockaddr_in*)&peer_sas)->sin_port));
-#endif
-	switch (n) {
-		case 0:
-			se->process(*(struct ev_loop **)ce->service->loop, ce->service);
-			break;
-		case 1:
-			blog();
-			// FIXME
-			se->process(*(struct ev_loop **)ce->service->loop, ce->service);
-			break;
-		case -1:
-			elog("lsquic_engine_packet_in()");
-			break;
-		default:
-			break;
-	}
 }
 
 ssize_t service_on_read(struct lsquic_stream *stream, lsquic_stream_ctx_t *sc)

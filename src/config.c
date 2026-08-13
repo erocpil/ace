@@ -1,5 +1,6 @@
 #include "config.h"
 #include "service.h"
+#include "packet_io.h"
 
 /* TODO command line params */
 

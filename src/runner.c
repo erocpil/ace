@@ -1,4 +1,5 @@
 #include "runner.h"
+#include "packet_io.h"
 
 static void runner_signal_quit(struct ev_loop *loop, ev_signal *s, int revents)
 {

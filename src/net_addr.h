@@ -1,6 +1,10 @@
 #ifndef ACE_NET_ADDR_H
 #define ACE_NET_ADDR_H
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>

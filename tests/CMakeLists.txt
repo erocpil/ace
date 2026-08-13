@@ -60,6 +60,15 @@ target_link_libraries(test_quic_global_concurrency PRIVATE
 	-Wl,--start-group liblsquic.a libssl.a libcrypto.a -Wl,--end-group pthread z m)
 add_test(NAME quic_global_concurrency COMMAND test_quic_global_concurrency)
 
+add_executable(test_packet_io
+	test_packet_io.c ${PROJECT_SOURCE_DIR}/src/connote.c ${PROJECT_SOURCE_DIR}/src/packet_io.c ${PROJECT_SOURCE_DIR}/src/mem_budget.c)
+target_include_directories(test_packet_io PRIVATE
+	${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/include/lsquic ${CMAKE_BINARY_DIR}/generated)
+target_compile_options(test_packet_io PRIVATE -Wall -Wextra -Werror -Wno-unused-function -UNDEBUG)
+target_link_libraries(test_packet_io PRIVATE
+	-Wl,--start-group liblsquic.a libssl.a libcrypto.a -Wl,--end-group pthread z m)
+add_test(NAME packet_io COMMAND test_packet_io)
+
 add_test(
 	NAME build_deps_version_selection
 	COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/check-build-deps.sh
