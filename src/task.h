@@ -87,6 +87,9 @@ struct task {
 	/* FIXME unsigned short int -> size_t */
 	unsigned short int n_sub;
 	size_t n_sub_done;
+	/* Request head (native struct upstream_skb_head + payload).
+	 * Valid only for TASK_ROLE_SEND (local upstream queue); NULL for
+	 * TASK_ROLE_RECV, which decodes the wire frame via task->nego. */
 	void *data;
 	int (*init)(struct task*);
 	int (*nego)(struct task*, struct sk_buff*);

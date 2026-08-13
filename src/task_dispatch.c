@@ -15,20 +15,35 @@ struct task* (*task_create_entity_func[TASK_TYPE_MAX])(unsigned short) = {
 
 struct task *task_create(struct sk_buff *skb, int role)
 {
-	struct upstream_skb_head validated;
+	struct upstream_skb_head head;
 
-	if (!skb || role < 0 || role >= TASK_ROLE_MAX ||
-			task_frame_validate(skb->head, skb->len, &validated) != 1) {
+	if (!skb || role < 0 || role >= TASK_ROLE_MAX) {
 		return NULL;
 	}
 
-	/* Read the decoded frame descriptor, not the raw wire bytes: the wire
-	 * header is struct ace_frame (14 bytes), while struct upstream_skb_head
-	 * is a native bookkeeping struct.  Reading theme/serial off the wire
-	 * buffer with the native layout yields garbage and rejects every frame. */
-	int type = validated.theme;
+	/*
+	 * The request head arrives in one of two layouts, keyed by role:
+	 *   - TASK_ROLE_RECV: the 14-byte wire frame (struct ace_frame), decoded
+	 *     and validated by task_frame_validate().
+	 *   - TASK_ROLE_SEND: the native internal head (struct upstream_skb_head)
+	 *     placed at skb->head by the local upstream queue.
+	 * Reading the wrong layout yields garbage theme/serial and rejects or
+	 * corrupts every request, so dispatch on role here.
+	 */
+	if (TASK_ROLE_RECV == role) {
+		if (task_frame_validate(skb->head, skb->len, &head) != 1) {
+			return NULL;
+		}
+	} else {
+		if (skb->len < sizeof(struct upstream_skb_head)) {
+			return NULL;
+		}
+		head = *(struct upstream_skb_head*)skb->head;
+	}
+
+	int type = head.theme;
 	/* including stream(0) */
-	int num = validated.serial + 1;
+	int num = head.serial + 1;
 	if (type >= TASK_TYPE_MAX) {
 		return NULL;
 	}
@@ -44,7 +59,10 @@ struct task *task_create(struct sk_buff *skb, int role)
 	task->role = role;
 	task->type = type;
 	task->n_sub = num;
-	task->data = (void*)skb->head;
+	/* task->data holds the native request head + payload; it is only read on
+	 * the SEND path (sendfile_init / *_nego).  RECV decodes via task->nego
+	 * and never dereferences task->data. */
+	task->data = (TASK_ROLE_SEND == role) ? (void*)skb->head : NULL;
 	task->start = rdtsc();
 	hplog("task %p start %lu", task, task->start);
 
