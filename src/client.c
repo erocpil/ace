@@ -205,6 +205,24 @@ static void client_async_w_cb(EV_P_ ev_async *w, int revents)
 	}
 }
 
+/* Drain upstream requests queued behind a just-finished task.  Runs on the
+ * event loop (async), so lsquic_engine_connect() is not invoked re-entrantly
+ * from within client_on_conn_closed(). */
+static void client_drain_cb(EV_P_ ev_async *w, int revents)
+{
+	struct client_event_loop *evl = (struct client_event_loop*)w->data;
+	struct upstream_echo *echo = NULL;
+
+	if (!evl || !evl->up) {
+		return;
+	}
+	list_for_each_entry(echo, &evl->up->echo_head, echo_node) {
+		if (echo->n_rq > 0) {
+			client_process_upstream_read(echo);
+		}
+	}
+}
+
 void client_stop_event(struct service *se)
 {
 	struct client_event_loop *evl = (struct client_event_loop*)se->loop;
@@ -310,6 +328,11 @@ static int client_process_upstream_read(struct upstream_echo *echo)
 	struct sk_buff *skb = NULL;
 	struct sk_buff *n = NULL;
 	list_for_each_entry_safe(skb, n, &echo->recv_queue, skb_node) {
+		/* One task per connection: if a task is already in flight, defer
+		 * the remaining requests.  They are re-drained after the current
+		 * task's connection closes (client_on_conn_closed). */
+		if (lconn_ctx->task)
+			break;
 		struct upstream_skb_head *head = (struct upstream_skb_head*)skb->head;
 		log("%p %u %u %u", head, head->length, head->theme, head->serial);
 		struct task *task = task_create(skb, TASK_ROLE_SEND);
@@ -424,6 +447,9 @@ int client_run_event(struct service *se)
 	ev_async_init(&evl->async_w, client_async_w_cb);
 	evl->async_w.data = (void*)se;
 
+	ev_async_init(&evl->drain_w, client_drain_cb);
+	evl->drain_w.data = (void*)evl;
+
 	struct config *cc = &se->config;
 	evl->up = upstream_init(evl->loop, 4, cc->retry, cc->retry_timeout, cc->file,
 			client_process_upstream_read, NULL, 0);
@@ -440,6 +466,7 @@ int client_run_event(struct service *se)
 	}
 
 	ev_async_start(evl->loop, &evl->async_w);
+	ev_async_start(evl->loop, &evl->drain_w);
 	if (service_is_stopped(se)) {
 		result = 0;
 		goto cleanup_async;
@@ -456,6 +483,7 @@ int client_run_event(struct service *se)
 
 cleanup_async:
 	ev_async_stop(evl->loop, &evl->async_w);
+	ev_async_stop(evl->loop, &evl->drain_w);
 cleanup_upstream:
 	upstream_free(evl->up);
 	evl->up = NULL;
@@ -570,6 +598,12 @@ void client_on_conn_closed(lsquic_conn_t *conn)
 		ylog("echo back");
 		echo->external = NULL;
 		client_process_upstream_write(echo, skb);
+		/* More requests may be queued; start the next connection on the
+		 * next loop iteration (async) so lsquic_engine_connect() is not
+		 * called re-entrantly from on_conn_closed. */
+		if (echo->n_rq > 0 && evl->loop) {
+			ev_async_send(evl->loop, &evl->drain_w);
+		}
 	} else {
 		skb_free(skb);
 	}

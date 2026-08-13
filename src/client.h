@@ -36,6 +36,7 @@ struct client_event_loop {
 	struct ev_loop *loop;
 	ev_timer timer;
 	ev_async async_w;
+	ev_async drain_w;
 	struct upstream *up;
 	struct client *ct;
 } __attribute__((aligned(sizeof(long))));
