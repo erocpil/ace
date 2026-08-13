@@ -69,6 +69,15 @@ target_link_libraries(test_packet_io PRIVATE
 	-Wl,--start-group liblsquic.a libssl.a libcrypto.a -Wl,--end-group pthread z m)
 add_test(NAME packet_io COMMAND test_packet_io)
 
+add_executable(test_quic_session
+	test_quic_session.c ${PROJECT_SOURCE_DIR}/src/quic_session.c ${PROJECT_SOURCE_DIR}/src/mem_budget.c)
+target_include_directories(test_quic_session PRIVATE
+	${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/include/lsquic ${CMAKE_BINARY_DIR}/generated)
+target_compile_options(test_quic_session PRIVATE -Wall -Wextra -Werror -Wno-unused-function -UNDEBUG)
+target_link_libraries(test_quic_session PRIVATE
+	-Wl,--start-group liblsquic.a libssl.a libcrypto.a -Wl,--end-group pthread z m)
+add_test(NAME quic_session COMMAND test_quic_session)
+
 add_test(
 	NAME build_deps_version_selection
 	COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/check-build-deps.sh

@@ -9,9 +9,7 @@
 #include "service.h"     /* struct service, struct config, hash, tls_context */
 #include "quic_global.h" /* ace_quic_global_init */
 #include "define.h"      /* log macros */
-
-/* session-resume callback lives in service.c (session layer) */
-int on_new_session(SSL *ssl, SSL_SESSION *session);
+#include "quic_session.h" /* on_new_session (session resume callback) */
 
 static inline int service_init_ssl_ctx(struct service *se);
 static int service_init_ssl_ctx_server(struct service *se);
