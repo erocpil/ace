@@ -200,8 +200,23 @@ LSan 在不受 ptrace 限制的环境中运行完整可执行文件和集成测�
 - LSan 运行方式：`cmake -S . -B build/lsan -DACE_SANITIZER=leak` → build → `ACE_BUILD_DIR=build/lsan
   LSAN_OPTIONS=exitcode=23 bash scripts/smoke-test.sh`。
 
-**剩余所有权项**（未审计）：connection/task/stream 的销毁幂等性（`quic_connection.c`、`service_on_read/write`
- 的 TASK_EXIT/FAIL 路径、`lconn_ctx` 释放）尚待逐一核对；LSan 尚未接入 CI（P7 分解时加）。
+**第二轮（2026-08-13）**：connection/task/stream 销毁幂等性审计完成，修复 5 处 + 1 处 init 失败路径泄漏：
+
+- `perf_exit` 原为空操作，perf task（task 结构 + 每个 subtask 的 `pfst[i].data` + nego）整体泄漏 → 补齐释放。
+- `sendfile_exit` 只 free nego 结构、漏其 strdup 的 path/file/type（SEND）；RECV 侧连 nego 结构都漏 → 补齐。
+- client/server 的 init/nego 失败路径只 `skb_free` 就 continue/return，task 不释放 → 补 `task->exit(task)`。
+- `service_stream_ctx_free` 不摘 `stream_node` 链，running/pending 链表留悬空节点 → `list_empty` 守卫 + `list_del_init`。
+- `on_conn_closed` 漏释放 stream 0 未建立时的 `lconn_ctx->pending` ctx（server + client）→ 补释放。
+- `sendfile_init` SEND 侧 `fstat` 失败漏 `close(fd)`；mmap 失败后 `sft->data` 残留 `MAP_FAILED` 致 `sendfile_exit`
+  误调 `munmap` → close fd + 失败时归一化为 NULL。
+
+验证：gcc / clang 双编译零警告、30/30 CTest 全绿、LSan 全量 30/30 无泄漏；`test_task_perf`/`test_task_sendfile`
+扩为走 `perf_exit`/`sendfile_exit` 真实释放路径（LSan 下零泄漏）。
+
+**剩余所有权项**：`service_on_read/write` 的 TASK_EXIT/FAIL 路径与 `quic_connection.c` 状态机均不直接持有资源
+（task 归 `lconn_ctx->task`、由 `task->exit` 在 `on_conn_closed` 释放；conn 状态机为内嵌值类型），已核对无需改动；
+`lconn_ctx->internal`（echo 指针）在 `on_conn_closed` 后成悬空但 echo 由 upstream 侧单独管理、无后续解引用，仅记录。
+LSan 尚未接入 CI（P7 分解时加）。
 
 **集成路径 sanitizer 覆盖缺口**（后续改进项，暂不改 CI）：
 
