@@ -189,6 +189,20 @@ Control 层：
 
 LSan 在不受 ptrace 限制的环境中运行完整可执行文件和集成测试套件。修复并记录每个确认的 leak。
 
+**当前状态（2026-08-13）**：第一轮所有权审计 + LSan 已完成。
+
+- 修复 echo 生命周期：`upstream_echo_delete()` 统一为单一 destroy 入口（摘链 + 关 fd + 释放 rbuf/队列/自身），
+  消除三处缺陷——accept/read_char 失败路径 free 未摘链导致的悬空指针、read_char/write_char ERROR 路径摘链未
+  free 导致的泄漏、fd 关闭分散。删除死函数 `upstream_destroy_echo()`。
+- LSan 全量（`ACE_SANITIZER=leak` 构建 + `smoke-test.sh` 跑 server/client 握手 + probe + SIGTERM 优雅关闭）：
+  修复 `service_func()` 重复 `service_init_cert_hash()` 导致的 cert_hash 泄漏（272 B）；修复后 server 退出码 0、
+  无泄漏报告。单元 + 契约测试 28/28 无泄漏。
+- LSan 运行方式：`cmake -S . -B build/lsan -DACE_SANITIZER=leak` → build → `ACE_BUILD_DIR=build/lsan
+  LSAN_OPTIONS=exitcode=23 bash scripts/smoke-test.sh`。
+
+**剩余所有权项**（未审计）：connection/task/stream 的销毁幂等性（`quic_connection.c`、`service_on_read/write`
+ 的 TASK_EXIT/FAIL 路径、`lconn_ctx` 释放）尚待逐一核对；LSan 尚未接入 CI（P7 分解时加）。
+
 **集成路径 sanitizer 覆盖缺口**（后续改进项，暂不改 CI）：
 
 ASan/UBSan 当前只跑单元 + 契约测试，两个集成测试（TLS 握手、连接隔离）经 `-LE '^integration$'` 排除，
