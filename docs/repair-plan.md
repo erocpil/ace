@@ -181,6 +181,15 @@ Control 层：
 
 LSan 在不受 ptrace 限制的环境中运行完整可执行文件和集成测试套件。修复并记录每个确认的 leak。
 
+**集成路径 sanitizer 覆盖缺口**（后续改进项，暂不改 CI）：
+
+ASan/UBSan 当前只跑单元 + 契约测试，两个集成测试（TLS 握手、连接隔离）经 `-LE '^integration$'` 排除，
+避免 stdbuf、预加载、超时和 QUIC 时序与 sanitizer 互相干扰。代价是 service.c / quic_engine.c /
+quic_stream.c 的真实网络路径缺内存检测，这些路径只靠 Debug/Release 的功能性验证兜底。
+
+后续：新增一个不使用 stdbuf、范围更小、可独立运行的 sanitizer QUIC smoke test，
+覆盖一次最小握手 + probe 往返，补上这块空白。
+
 ---
 
 ### P7：CI 分解

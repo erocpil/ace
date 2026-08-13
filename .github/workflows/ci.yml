@@ -47,10 +47,6 @@ jobs:
         run: cmake --build build/ci
       - name: Unit and contract regressions
         run: ctest --test-dir build/ci --output-on-failure
-      - name: TLS identity verification
-        env:
-          ACE_BUILD_DIR: build/ci
-        run: bash scripts/tls-verify-test.sh
 
   sanitizer:
     name: ${{ matrix.sanitizer }} sanitizer
@@ -80,7 +76,7 @@ jobs:
       - name: Sanitizer regressions
         env:
           ASAN_OPTIONS: ${{ matrix.sanitizer == 'address' && 'detect_leaks=0' || '' }}
-        run: ctest --test-dir build/${{ matrix.sanitizer }} --output-on-failure -LE integration
+        run: ctest --test-dir build/${{ matrix.sanitizer }} --output-on-failure -LE '^integration$'
 
   fuzz:
     name: Protocol fuzz smoke
