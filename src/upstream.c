@@ -170,24 +170,6 @@ int upstream_socket_connect(char *ipaddr, unsigned short int port)
 	return fd;
 }
 
-void upstream_destroy_echo(struct upstream_echo *echo)
-{
-	if (!echo) {
-		return;
-	}
-
-	// XXX
-	if (echo->rbuf) {
-		free(echo->rbuf);
-	}
-	// XXX
-	if (echo->sbuf) {
-		free(echo->sbuf);
-	}
-
-	// TODO foreach free skb_head
-}
-
 struct upstream_echo *upstream_echo_create(ssize_t len)
 {
 	struct upstream_echo *echo =
@@ -210,6 +192,10 @@ struct upstream_echo *upstream_echo_create(ssize_t len)
 	return echo;
 }
 
+/* upstream_echo_delete — the single destroy entry for an echo.
+ * Owns the client fd, rbuf, queued sk_buffs, and the echo struct itself:
+ * removes the echo from its upstream's list (if linked), closes the fd, then
+ * frees everything.  Callers must not also del_echo()/close() the echo. */
 static void upstream_echo_delete(struct upstream_echo *echo)
 {
 	if (!echo) {
@@ -217,7 +203,17 @@ static void upstream_echo_delete(struct upstream_echo *echo)
 	}
 	clog("echo %p n_rq %u n_tq %u", echo, echo->n_rq, echo->n_sq);
 
-	/* XXX */
+	/* Remove from the upstream's echo list, if it was ever linked. */
+	if (echo->up) {
+		upstream_del_echo(echo->up, echo);
+	}
+
+	/* Close the client fd (owned by the echo). */
+	if (echo->fd >= 0) {
+		close(echo->fd);
+		echo->fd = -1;
+	}
+
 	/* 1. free rbuf */
 	skb_free(echo->rbuf);
 	echo->rbuf = NULL;
@@ -241,7 +237,6 @@ static void upstream_echo_delete(struct upstream_echo *echo)
 	}
 
 	/* 3. free echo itself */
-	// delete(echo);
 	log("free(echo %p)", echo);
 	free(echo);
 }
@@ -365,7 +360,6 @@ static void upstream_accept(struct ev_loop *loop,
 
 	if (upstream_call_rx_process_func(echo) < 0) {
 		upstream_echo_delete(echo);
-		close(sock);
 		elog("upstream_call_rx_process_func()");
 		return;
 	}
@@ -541,8 +535,6 @@ static void upstream_read(struct ev_loop *loop, struct ev_io *watcher, int reven
 
 ERROR:
 	ev_io_stop(loop, watcher);
-	upstream_del_echo(echo->up, echo);
-	log("up ->n_echo %lu", echo->up->n_echo);
 	upstream_echo_delete(echo);
 }
 
@@ -651,11 +643,6 @@ void upstream_free(struct upstream *up)
 		if (up->loop) {
 			ev_io_stop(up->loop, &echo->w);
 		}
-		upstream_del_echo(up, echo);
-		if (echo->fd >= 0) {
-			close(echo->fd);
-			echo->fd = -1;
-		}
 		upstream_echo_delete(echo);
 	}
 	if (up->loop) {
@@ -718,7 +705,6 @@ static void upstream_read_char(struct ev_loop *loop, struct ev_io *watcher, int 
 			}
 			if (upstream_call_rx_process_func(echo) < 0) {
 				upstream_echo_delete(echo);
-				close(fd);
 				elog("upstream_call_rx_process_func()");
 				return;
 			}
@@ -759,7 +745,6 @@ static void upstream_read_char(struct ev_loop *loop, struct ev_io *watcher, int 
 	return;
 
 ERROR:
-	/* FIXME */
 	echo->valid = 0;
 	if (EBADF == errno) { /* fd may be closed previously */
 		return;
@@ -767,11 +752,7 @@ ERROR:
 	ev_io_stop(loop, watcher);
 	ylog("stop echo %p(%p %p) loop %p watcher %p",
 			echo, echo->up->loop, &echo->w, loop, watcher);
-	close(fd);
-	rlog("%d closed", fd);
-	upstream_del_echo(echo->up, echo);
-	/* FIXME if echo is to be deleted, client should know */
-	// upstream_echo_delete(echo);
+	upstream_echo_delete(echo);
 }
 
 static void upstream_write_char(struct ev_loop *loop, struct ev_io *watcher, int revents)
@@ -875,7 +856,6 @@ static void upstream_write_char(struct ev_loop *loop, struct ev_io *watcher, int
 	return;
 
 ERROR:
-	/* FIXME */
 	echo->valid = 0;
 	if (EBADF == errno) { /* fd may be closed previously */
 		return;
@@ -883,10 +863,7 @@ ERROR:
 	ev_io_stop(loop, watcher);
 	ylog("stop echo %p(%p %p) loop %p watcher %p",
 			echo, echo->up->loop, &echo->w, loop, watcher);
-	close(fd);
-	rlog("%d closed", fd);
-	upstream_del_echo(echo->up, echo);
-	// upstream_echo_delete(echo);
+	upstream_echo_delete(echo);
 }
 
 void upstream_readwrite_char(struct ev_loop *loop, struct ev_io *watcher, int revents)
