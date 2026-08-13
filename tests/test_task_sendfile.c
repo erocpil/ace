@@ -1,0 +1,46 @@
+#define _GNU_SOURCE
+#include <assert.h>
+#include <stdlib.h>
+#include "task_sendfile.h"
+
+int main(void)
+{
+	struct task *t = task_create_sendfile(3);
+	assert(t != NULL);
+
+	/* callbacks wired to the sendfile family */
+	assert(t->init == sendfile_init);
+	assert(t->nego == sendfile_nego);
+	assert(t->exit == sendfile_exit);
+
+	/* stream 0 is the control stream */
+	struct subtask *s0 = task_get_sendfile_sub_at(t, 0);
+	assert(s0 != NULL);
+	assert(s0->no == 0);
+	assert(s0->rx_func == sendfile_ctrl_rx);
+	assert(s0->tx_func == sendfile_ctrl_tx);
+	assert(s0->done == sendfile_done);
+	assert(s0->task == t);
+
+	/* streams 1..n-1 are data streams */
+	struct subtask *s1 = task_get_sendfile_sub_at(t, 1);
+	assert(s1 != NULL);
+	assert(s1->no == 1);
+	assert(s1->rx_func == sendfile_rx);
+	assert(s1->tx_func == sendfile_tx);
+
+	/* n_sub is set by task_create (the dispatch entry), not by the
+	 * entity factory; mirror that before exercising the iterator. */
+	t->n_sub = 3;
+
+	/* sequential accessor walks 0,1,2 then NULL */
+	struct subtask *a = task_get_sendfile_sub_next(t);
+	assert(a == s0);
+	struct subtask *b = task_get_sendfile_sub_next(t);
+	assert(b == s1);
+	assert(task_get_sendfile_sub_next(t) != NULL);   /* stream 2 */
+	assert(task_get_sendfile_sub_next(t) == NULL);   /* exhausted */
+
+	free(t);
+	return 0;
+}

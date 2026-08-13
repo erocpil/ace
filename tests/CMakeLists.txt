@@ -91,6 +91,15 @@ target_include_directories(test_protocol_types PRIVATE ${PROJECT_SOURCE_DIR}/src
 target_compile_options(test_protocol_types PRIVATE -Wall -Wextra -Werror -Wno-unused-function -UNDEBUG)
 add_test(NAME protocol_types COMMAND test_protocol_types)
 
+add_executable(test_task_sendfile
+	test_task_sendfile.c ${PROJECT_SOURCE_DIR}/src/task_sendfile.c ${PROJECT_SOURCE_DIR}/src/protocol_codec.c ${PROJECT_SOURCE_DIR}/src/mem_budget.c)
+target_include_directories(test_task_sendfile PRIVATE
+	${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/include/lsquic ${CMAKE_BINARY_DIR}/generated)
+target_compile_options(test_task_sendfile PRIVATE -Wall -Wextra -Werror -Wno-unused-function -UNDEBUG)
+target_link_libraries(test_task_sendfile PRIVATE
+	-Wl,--start-group liblsquic.a libssl.a libcrypto.a -Wl,--end-group libmagic.so liblzma.so pthread z m)
+add_test(NAME task_sendfile COMMAND test_task_sendfile)
+
 add_test(
 	NAME build_deps_version_selection
 	COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/check-build-deps.sh
@@ -119,7 +128,7 @@ add_test(
 add_test(
 	NAME task_ownership
 	COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/check-task-ownership.sh
-		${PROJECT_SOURCE_DIR}/src/task.c)
+		${PROJECT_SOURCE_DIR}/src/task_sendfile.c)
 
 add_test(
 	NAME quic_global_lifecycle

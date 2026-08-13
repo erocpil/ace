@@ -104,31 +104,16 @@ struct subtask {
 	unsigned short int no;
 } __attribute__((aligned(sizeof(char*))));
 
-struct sendfile_subtask {
-	/* this element must be the first */
-	struct subtask sub;
-	void *data;
-	size_t length;
-	size_t offset;
-};
+/* Record task completion time (used by task exit callbacks). */
+static inline void task_exit(struct task *task)
+{
+	task->end = rdtsc();
 
-struct sendfile_task {
-	/* thie element must be the first */
-	struct task task;
-	// struct subtask subtask;
-	// struct task *task;
-	char *path;
-	char *file;
-	char *type;
-	char *source_path;
-	void *data;
-	size_t length;
-	size_t offset;
-	struct ace_sendfile_nego *nego;
-	/* FIXME unsigned short int -> size_t */
-	unsigned short int index;
-	struct sendfile_subtask sfst[0];
-} __attribute__((aligned(sizeof(char*))));
+	unsigned long c = task->end - task->start;
+	hplog("task %p sub %u done %lu start %lu end %lu cycle %lu",
+		task, task->n_sub, task->n_sub_done,
+		task->start, task->end, c);
+}
 
 struct perf_subtask{
 	struct subtask sub;
@@ -178,15 +163,6 @@ void task_add_sub(struct task *t, struct subtask *s);
 struct task *task_create(struct sk_buff *skb, int role);
 struct subtask *task_get_sub_at(struct task *t, unsigned short int n);
 struct subtask *task_get_sub_next(struct task *t);
-
-int sendfile_init(struct task *task);
-int sendfile_nego(struct task *task, struct sk_buff* skb);
-struct sk_buff *sendfile_exit(struct task *task);
-ssize_t sendfile_ctrl_rx(struct lsquic_stream_ctx *sc);
-ssize_t sendfile_ctrl_tx(struct lsquic_stream_ctx *sc);
-ssize_t sendfile_rx(struct lsquic_stream_ctx *sc);
-ssize_t sendfile_tx(struct lsquic_stream_ctx *sc);
-int sendfile_done(struct lsquic_stream_ctx *sc);
 
 int perf_init(struct task *task);
 int perf_nego(struct task *task, struct sk_buff* skb);
