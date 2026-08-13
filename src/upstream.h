@@ -64,12 +64,6 @@ struct upstream {
 	int mode;
 } __attribute__((aligned(sizeof(char))));
 
-struct upstream_gateway {
-	struct ace_hash *in_hash;
-	struct ace_hash *out_hash;
-	struct upstream *up;
-};
-
 #define upstream_is_un(up) ((up) && (up)->file && strlen((up)->file))
 #define upstream_is_simple(up) (!upstream_is_un(up))
 

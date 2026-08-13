@@ -939,11 +939,3 @@ void upstream_readwrite_char(struct ev_loop *loop, struct ev_io *watcher, int re
 		ylog();
 	}
 }
-
-/* XXX */
-struct upstream_gateway *upstream_gw_init(unsigned int n_bucket, unsigned int max_elem)
-{
-	ace_hash_create(n_bucket, max_elem);
-	ace_hash_create(n_bucket, max_elem);
-	return NULL;
-}
