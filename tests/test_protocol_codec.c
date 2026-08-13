@@ -57,6 +57,7 @@ int main(void)
 	assert(ace_sendfile_nego_encode(probe_buf, sizeof(probe_buf), 3, NULL) == 0);
 
 	/* ---- 7. Buffer too small ---- */
+	struct ace_sendfile_chunk sfn_chunks[1] = { { .offset = 0, .size = 42 } };
 	struct ace_sendfile_nego sfn = {
 		.code = 1,
 		.path = "/tmp/x",
@@ -66,8 +67,11 @@ int main(void)
 		.file_len = 3,
 		.type_len = 3,
 		.file_length = 42,
+		.n_segments = 1,
+		.chunks = sfn_chunks,
 	};
-	size_t sfn_total = ACE_FRAME_HDR_LEN + ACE_WIRE_SENDFILE_NEGO_LEN + 6 + 3 + 3;
+	size_t sfn_total = ACE_FRAME_HDR_LEN + ACE_WIRE_SENDFILE_NEGO_LEN
+		+ 6 + 3 + 3 + ACE_WIRE_SENDFILE_CHUNK_LEN;
 	assert(ace_sendfile_nego_encode(NULL, 0, 0, &sfn) == sfn_total);
 	assert(ace_sendfile_nego_encode(probe_buf, sfn_total - 1, 0, &sfn) == 0);
 	assert(ace_sendfile_nego_encode(probe_buf, sfn_total, 0, &sfn) == sfn_total);

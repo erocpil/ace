@@ -94,6 +94,7 @@ int main(void)
 
 	/* --- RECV path: wire frame --- */
 	{
+		struct ace_sendfile_chunk snego_chunks[1] = { { .offset = 0, .size = 4096 } };
 		struct ace_sendfile_nego snego = {
 			.code        = 0,
 			.path        = "tmp",
@@ -103,6 +104,8 @@ int main(void)
 			.type        = "binary",
 			.type_len    = 7,   /* "binary\0" */
 			.file_length = 4096,
+			.n_segments  = 1,
+			.chunks      = snego_chunks,
 		};
 		size_t slen = ace_sendfile_nego_encode(wire, sizeof(wire), 2, &snego);
 		assert(slen > 0);

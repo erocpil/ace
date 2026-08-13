@@ -7,10 +7,12 @@ int main(void)
 {
 	/* Wire structs must stay fixed-size across compilers/archs. */
 	assert(sizeof(struct ace_wire_frame) == 16);
-	assert(sizeof(struct ace_wire_sendfile_nego) == 12);
+	assert(sizeof(struct ace_wire_sendfile_nego) == 14);
+	assert(sizeof(struct ace_wire_sendfile_chunk) == 12);
 	assert(sizeof(struct ace_wire_perf_nego) == 4);
 	assert(sizeof(struct ace_wire_probe) == 24);
-	assert(ACE_WIRE_SENDFILE_NEGO_LEN == 12);
+	assert(ACE_WIRE_SENDFILE_NEGO_LEN == 14);
+	assert(ACE_WIRE_SENDFILE_CHUNK_LEN == 12);
 	assert(ACE_WIRE_PERF_NEGO_LEN == 4);
 	assert(ACE_WIRE_PROBE_LEN == 24);
 	assert(ACE_FRAME_HDR_LEN == 16);

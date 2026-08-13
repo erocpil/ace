@@ -9,6 +9,7 @@ static unsigned char wire[4096];
 
 static size_t make_sendfile_frame(void)
 {
+	struct ace_sendfile_chunk chunks[1] = { { .offset = 0, .size = 4096 } };
 	struct ace_sendfile_nego nego = {
 		.code        = 0,
 		.path        = "tmp",
@@ -18,6 +19,8 @@ static size_t make_sendfile_frame(void)
 		.type        = "binary",
 		.type_len    = 7,   /* "binary\0" */
 		.file_length = 4096,
+		.n_segments  = 1,
+		.chunks      = chunks,
 	};
 	return ace_sendfile_nego_encode(wire, sizeof(wire), 3, &nego);
 }

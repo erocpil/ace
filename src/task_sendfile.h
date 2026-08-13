@@ -22,6 +22,8 @@ struct sendfile_task {
 	size_t length;
 	size_t offset;
 	struct ace_sendfile_nego *nego;
+	/* explicit chunk plan (offset/size per data stream); sender-owned */
+	struct ace_sendfile_chunk *chunks;
 	/* FIXME unsigned short int -> size_t */
 	unsigned short int index;
 	struct sendfile_subtask sfst[0];

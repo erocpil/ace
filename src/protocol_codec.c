@@ -2,6 +2,7 @@
 #include "resource_limits.h"
 #include "task_protocol.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 /* ------------------------------------------------------------------ */
@@ -11,9 +12,9 @@
 int ace_sendfile_nego_decode(const unsigned char *buf, size_t buflen,
 			     struct ace_sendfile_nego *out)
 {
-	size_t strings_len;
+	size_t strings_len, chunks_len;
 	const unsigned char *strings;
-	uint16_t code, path_len, file_len, type_len;
+	uint16_t code, path_len, file_len, type_len, n_segments;
 	uint32_t file_length;
 
 	if (!buf || buflen < ACE_WIRE_SENDFILE_NEGO_LEN)
@@ -24,17 +25,20 @@ int ace_sendfile_nego_decode(const unsigned char *buf, size_t buflen,
 	file_len    = ace_rd16(buf + 4);
 	type_len    = ace_rd16(buf + 6);
 	file_length = ace_rd32(buf + 8);
+	n_segments  = ace_rd16(buf + 12);
 
 	/* Validate ranges */
 	if (path_len == 0 || path_len > 4096 ||
 	    file_len == 0 || file_len > 256 ||
 	    type_len == 0 || type_len > 1024 ||
 	    file_length == 0 ||
-	    file_length > ACE_MAX_FILE_SIZE)
+	    file_length > ACE_MAX_FILE_SIZE ||
+	    n_segments == 0 || n_segments > ACE_MAX_TASK_STREAMS)
 		return -1;
 
 	strings_len = (size_t)path_len + file_len + type_len;
-	if (strings_len != buflen - ACE_WIRE_SENDFILE_NEGO_LEN)
+	chunks_len = (size_t)n_segments * ACE_WIRE_SENDFILE_CHUNK_LEN;
+	if (buflen != ACE_WIRE_SENDFILE_NEGO_LEN + strings_len + chunks_len)
 		return -1;
 
 	strings = buf + ACE_WIRE_SENDFILE_NEGO_LEN;
@@ -45,15 +49,45 @@ int ace_sendfile_nego_decode(const unsigned char *buf, size_t buflen,
 	    strings[path_len + file_len + type_len - 1] != '\0')
 		return -1;
 
+	/* Validate the chunk plan byte-wise (no alignment assumptions): contiguous
+	 * offsets that tile the file exactly (sum == file_length). */
+	const unsigned char *wire_chunks = strings + strings_len;
+	uint64_t expected_offset = 0;
+	for (uint16_t i = 0; i < n_segments; i++) {
+		uint64_t off = ace_rd64(wire_chunks + i * ACE_WIRE_SENDFILE_CHUNK_LEN);
+		uint32_t sz  = ace_rd32(wire_chunks + i * ACE_WIRE_SENDFILE_CHUNK_LEN + 8);
+		if (off != expected_offset)
+			return -1;
+		expected_offset += sz;
+	}
+	if (expected_offset != file_length)
+		return -1;
+
 	if (out) {
+		/* Materialize the chunk plan into a native, aligned array (the wire
+		 * layout is packed 12-byte entries; a struct cast would misalign). */
+		struct ace_sendfile_chunk *native =
+			(struct ace_sendfile_chunk*)malloc(
+				(size_t)n_segments * sizeof(*native));
+		if (!native)
+			return -1;
+		for (uint16_t i = 0; i < n_segments; i++) {
+			native[i].offset = ace_rd64(wire_chunks +
+						    i * ACE_WIRE_SENDFILE_CHUNK_LEN);
+			native[i].size   = ace_rd32(wire_chunks +
+						    i * ACE_WIRE_SENDFILE_CHUNK_LEN + 8);
+		}
+
 		out->code        = code;
 		out->path_len    = path_len;
 		out->file_len    = file_len;
 		out->type_len    = type_len;
 		out->file_length = file_length;
+		out->n_segments  = n_segments;
 		out->path = (const char *)strings;
 		out->file = (const char *)(strings + path_len);
 		out->type = (const char *)(strings + path_len + file_len);
+		out->chunks = native;
 	}
 
 	return 0;
@@ -108,8 +142,13 @@ size_t ace_sendfile_nego_encode(unsigned char *buf, size_t bufsz,
 	if (!nego)
 		return 0;
 
+	if (nego->n_segments == 0 || !nego->chunks ||
+	    nego->n_segments > ACE_MAX_TASK_STREAMS)
+		return 0;
+
 	size_t total = ACE_FRAME_HDR_LEN + ACE_WIRE_SENDFILE_NEGO_LEN +
-		       (size_t)nego->path_len + nego->file_len + nego->type_len;
+		       (size_t)nego->path_len + nego->file_len + nego->type_len +
+		       (size_t)nego->n_segments * ACE_WIRE_SENDFILE_CHUNK_LEN;
 
 	/* buf==NULL is a dry-run: return required size without writing. */
 	if (!buf)
@@ -137,6 +176,7 @@ size_t ace_sendfile_nego_encode(unsigned char *buf, size_t bufsz,
 	ace_wr16(p + 4,  nego->file_len);
 	ace_wr16(p + 6,  nego->type_len);
 	ace_wr32(p + 8,  nego->file_length);
+	ace_wr16(p + 12, nego->n_segments);
 	p += ACE_WIRE_SENDFILE_NEGO_LEN;
 
 	memcpy(p, nego->path, nego->path_len);
@@ -144,6 +184,14 @@ size_t ace_sendfile_nego_encode(unsigned char *buf, size_t bufsz,
 	memcpy(p, nego->file, nego->file_len);
 	p += nego->file_len;
 	memcpy(p, nego->type, nego->type_len);
+	p += nego->type_len;
+
+	/* Chunk plan */
+	for (uint16_t i = 0; i < nego->n_segments; i++) {
+		ace_wr64(p,      nego->chunks[i].offset);
+		ace_wr32(p + 8,  nego->chunks[i].size);
+		p += ACE_WIRE_SENDFILE_CHUNK_LEN;
+	}
 
 	return total;
 }

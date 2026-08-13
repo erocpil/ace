@@ -72,6 +72,12 @@ int main(void)
 	sft->file = "a.txt";
 	sft->length = 1;
 
+	/* Build the chunk plan sendfile_init() would produce (n_sub-1 == 1). */
+	struct ace_sendfile_chunk sft_chunks[1] = { { .offset = 0, .size = 1 } };
+	sft->chunks = (struct ace_sendfile_chunk*)malloc(sizeof(sft_chunks));
+	assert(sft->chunks != NULL);
+	memcpy(sft->chunks, sft_chunks, sizeof(sft_chunks));
+
 	struct ace_sendfile_nego expected = {
 		.code = 0,
 		.path = sft->path,
@@ -81,6 +87,8 @@ int main(void)
 		.type = sft->type,
 		.type_len = (uint16_t)(strlen(sft->type) + 1),
 		.file_length = (uint32_t)sft->length,
+		.n_segments = 1,
+		.chunks = sft_chunks,
 	};
 	size_t total = ace_sendfile_nego_encode(NULL, 0, head.serial, &expected);
 	assert(total > 1);

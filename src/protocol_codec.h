@@ -61,6 +61,12 @@ static inline void ace_frame_encode(unsigned char *buf,
 /* Payload encode / decode                                             */
 /* ------------------------------------------------------------------ */
 
+/* One chunk-plan entry in native byte order. */
+struct ace_sendfile_chunk {
+	uint64_t       offset;
+	uint32_t       size;
+};
+
 /* Decoded sendfile negotiation — strings point into the wire buffer.
  * All integer fields are in native byte order and validated. */
 struct ace_sendfile_nego {
@@ -72,6 +78,9 @@ struct ace_sendfile_nego {
 	uint16_t       file_len;
 	uint16_t       type_len;
 	uint32_t       file_length;  /* was size_t */
+	uint16_t       n_segments;   /* number of chunk-plan entries */
+	const struct ace_sendfile_chunk *chunks; /* owned native array (decode
+						     allocates; encode reads) */
 };
 
 /* Decode a sendfile negotiation from a wire buffer.  Returns 0 on

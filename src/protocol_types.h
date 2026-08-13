@@ -53,15 +53,23 @@ struct ace_wire_frame {
 
 /* sendfile negotiation payload */
 struct ace_wire_sendfile_nego {
-	uint8_t  code[2];       /* uint16 be */
-	uint8_t  path_len[2];   /* uint16 be */
-	uint8_t  file_len[2];   /* uint16 be */
-	uint8_t  type_len[2];   /* uint16 be */
-	uint8_t  length[4];     /* uint32 be — was size_t! */
-	/* followed by path, file, type strings */
+	uint8_t  code[2];          /* uint16 be */
+	uint8_t  path_len[2];      /* uint16 be */
+	uint8_t  file_len[2];      /* uint16 be */
+	uint8_t  type_len[2];      /* uint16 be */
+	uint8_t  length[4];        /* uint32 be — was size_t! */
+	uint8_t  n_segments[2];    /* uint16 be — number of chunk-plan entries */
+	/* followed by path, file, type strings, then n_segments chunk entries */
 } __attribute__((packed));
 
-#define ACE_WIRE_SENDFILE_NEGO_LEN 12
+/* One chunk-plan entry: a contiguous byte range carried by one stream. */
+struct ace_wire_sendfile_chunk {
+	uint8_t  offset[8];        /* uint64 be — byte offset within the file */
+	uint8_t  size[4];          /* uint32 be — byte length of this segment */
+} __attribute__((packed));
+
+#define ACE_WIRE_SENDFILE_NEGO_LEN 14
+#define ACE_WIRE_SENDFILE_CHUNK_LEN 12
 
 /* perf negotiation payload */
 struct ace_wire_perf_nego {

@@ -224,6 +224,30 @@ DONE:
    */
 
 
+/* Build the explicit chunk plan: n_segments contiguous segments that tile
+ * the file exactly.  Chunk k covers [quota*k, quota*k + size).  Caller owns
+ * the returned array. */
+static struct ace_sendfile_chunk *sendfile_build_chunks(size_t length,
+							unsigned short n_segments)
+{
+	if (n_segments == 0)
+		return NULL;
+
+	struct ace_sendfile_chunk *chunks =
+		(struct ace_sendfile_chunk*)calloc(n_segments, sizeof(*chunks));
+	if (!chunks)
+		return NULL;
+
+	size_t quota = length / n_segments;
+	for (unsigned short i = 0; i < n_segments; i++) {
+		chunks[i].offset = quota * i;
+		chunks[i].size = (i == n_segments - 1)
+			? (length - quota * i) : quota;
+	}
+
+	return chunks;
+}
+
 int sendfile_init(struct task *task)
 {
 	struct sendfile_task *sft = container_of(task, struct sendfile_task, task);
@@ -388,34 +412,40 @@ int sendfile_init(struct task *task)
 		errno = ENOMEM;
 		return -1;
 	}
-	size_t quota = sft->length / n_sub_data;
 
-	ylog("checking if quota(%lu) exceeds 4G %lu SENDFILE_BLOCK_SIZE(%lu)",
-			quota, (size_t)((unsigned int)(-1)), (size_t)SENDFILE_BLOCK_SIZE);
-	if (quota > (size_t)(unsigned int)(-1)) {
-		munmap(sft->data, sft->length);
-		return -1;
+	/* Determine the chunk plan.  The sender builds it and encodes it in the
+	 * nego; the receiver validates the one it received. */
+	const struct ace_sendfile_chunk *chunks = NULL;
+	if (TASK_ROLE_SEND == task->role) {
+		struct ace_sendfile_chunk *built =
+			sendfile_build_chunks(sft->length, n_sub_data);
+		if (!built) {
+			munmap(sft->data, sft->length);
+			return -1;
+		}
+		sft->chunks = built;
+		chunks = built;
+	} else {
+		if (!sft->nego || !sft->nego->chunks ||
+		    sft->nego->n_segments != n_sub_data) {
+			munmap(sft->data, sft->length);
+			errno = EPROTO;
+			return -1;
+		}
+		chunks = sft->nego->chunks;
 	}
 
-	log("subtask %u quota %ld", n_sub_data, quota);
+	log("subtask %u", n_sub_data);
 	struct sendfile_subtask *sfst = NULL;
-	int i = 0;
-	for (i = 1; i < n_sub_data; i++) {
-		sfst = &sft->sfst[i];
-		sfst->data = sft->data + quota * (i - 1);
-		sfst->length = quota;
-		ylog("sfst[%d] %p data %p offset %ld length %ld",
-				i, sfst, sfst->data, quota * (i - 1), sfst->length);
-	}
-	/* the last subtask */
-	sfst = &sft->sfst[i];
-	sfst->data = sft->data + quota * (i - 1);
-	sfst->length = sft->length - quota * (i - 1);
-	ylog("sfst[%d] %p data %p offset %ld length %ld",
-			i, sfst, sfst->data, quota * (i - 1), sfst->length);
 	size_t tl = 0;
 	for (int i = 1; i <= n_sub_data; i++) {
-		tl += sft->sfst[i].length;
+		sfst = &sft->sfst[i];
+		sfst->data = sft->data + chunks[i - 1].offset;
+		sfst->length = chunks[i - 1].size;
+		tl += sfst->length;
+		ylog("sfst[%d] %p data %p offset %lu length %ld",
+				i, sfst, sfst->data,
+				(unsigned long)chunks[i - 1].offset, sfst->length);
 	}
 	ylog("%s %s %ld <=> %ld", sft->path, sft->file, sft->length, tl);
 	if (sft->length != tl) {
@@ -434,6 +464,7 @@ static void sendfile_nego_free(struct ace_sendfile_nego *nego)
 	free((void *)nego->path);
 	free((void *)nego->file);
 	free((void *)nego->type);
+	free((void *)nego->chunks);
 	free(nego);
 }
 
@@ -448,9 +479,22 @@ static struct ace_sendfile_nego *sendfile_nego_dup(
 	copy->path = NULL;
 	copy->file = NULL;
 	copy->type = NULL;
+	copy->chunks = NULL;
 	copy->path = strdup(source->path);
 	copy->file = strdup(source->file);
 	copy->type = strdup(source->type);
+	if (source->n_segments > 0) {
+		struct ace_sendfile_chunk *dup_chunks =
+			(struct ace_sendfile_chunk*)malloc(
+				(size_t)source->n_segments * sizeof(*dup_chunks));
+		if (!dup_chunks) {
+			sendfile_nego_free(copy);
+			return NULL;
+		}
+		memcpy(dup_chunks, source->chunks,
+		       (size_t)source->n_segments * sizeof(*dup_chunks));
+		copy->chunks = dup_chunks;
+	}
 	if (!copy->path || !copy->file || !copy->type) {
 		sendfile_nego_free(copy);
 		return NULL;
@@ -485,8 +529,10 @@ int sendfile_nego(struct task *task, struct sk_buff* skb)
 			return -1;
 		}
 
-		/* Dup strings into owned memory (wire buffer is temporary). */
+		/* Dup strings into owned memory (wire buffer is temporary); decode
+		 * already materialized the chunk array, which dup copies again. */
 		struct ace_sendfile_nego *owned = sendfile_nego_dup(nego);
+		free((void *)nego->chunks);
 		free(nego);
 		if (!owned)
 			return -1;
@@ -507,6 +553,8 @@ int sendfile_nego(struct task *task, struct sk_buff* skb)
 		.type        = sft->type,
 		.type_len    = (uint16_t)(strlen(sft->type) + 1),
 		.file_length = (uint32_t)sft->length,
+		.n_segments  = (uint16_t)(task->n_sub - 1),
+		.chunks      = sft->chunks,
 	};
 
 	/* Allocate owned copy for internal use. */
@@ -611,6 +659,7 @@ struct sk_buff *sendfile_exit(struct task *task)
 	} else {
 		free(sft->source_path);
 		free(sft->type);
+		free(sft->chunks);
 	}
 	/* nego owns strdup'd strings in both roles */
 	sendfile_nego_free(sft->nego);
