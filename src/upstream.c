@@ -307,7 +307,7 @@ static void upstream_accept(struct ev_loop *loop,
 		struct ev_io *watcher, int revents)
 {
 	int fd = watcher->fd;
-	struct sockaddr_in client_addr;
+	struct sockaddr_storage client_addr;
 	socklen_t len = sizeof(client_addr);
 	memset(&client_addr, 0, len);
 
@@ -322,8 +322,14 @@ static void upstream_accept(struct ev_loop *loop,
 		return;
 	}
 
-	log("accept socket %u %s:%u", sock,
-			inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+	if (client_addr.ss_family == AF_INET) {
+		struct sockaddr_in *sin = (struct sockaddr_in*)&client_addr;
+		log("accept socket %u %s:%u", sock,
+		    inet_ntoa(sin->sin_addr), ntohs(sin->sin_port));
+	} else {
+		/* Unix-socket peer: no INET address to log. */
+		log("accept socket %u (family %u)", sock, client_addr.ss_family);
+	}
 
 	upstream_set_sockopt(sock);
 
@@ -364,48 +370,6 @@ static void upstream_accept(struct ev_loop *loop,
 		return;
 	}
 	echo->valid = 1;
-}
-
-/* XXX */
-static void upstream_accept_un(struct ev_loop *loop,
-		struct ev_io *watcher, int revents)
-{
-	rlog();
-	int fd = watcher->fd;
-	struct sockaddr_un addr;
-	int len = sizeof(addr);
-	memset(&addr, 0, len);
-
-	if (EV_ERROR & revents) {
-		elog("invalid event");
-		return;
-	}
-
-	int sock = accept(fd, (struct sockaddr*)&addr, (socklen_t*)&len);
-	if (-1 == sock) {
-		elog("accept() %d %s", errno, strerror(errno));
-		return;
-	}
-
-	log("accept %s:%u", inet_ntoa(((struct sockaddr_in*)&addr)->sin_addr), ntohs(((struct sockaddr_in*)&addr)->sin_port));
-
-	len = sizeof(addr);
-	if (-1 == getpeername(sock, (struct sockaddr*)&addr,
-				(socklen_t*)&len)) {
-		eslog("getpeername(%d)", sock);
-	} else {
-		log("accept alpha %d %s", sock, addr.sun_path);
-	}
-
-	upstream_set_sockopt(sock);
-
-	struct upstream_echo *echo = upstream_echo_create(-1);
-	// skb_reserve(echo->skb, sizeof(struct upstream_skb_head));
-	echo->w.data = (void*)echo;
-	ev_io_init(&echo->w, upstream_readwrite, sock, EV_READ | EV_WRITE);
-	ev_io_start(loop, &echo->w);
-
-	upstream_add_echo(echo->up, echo);
 }
 
 int upstream_listen(struct upstream *up)
@@ -840,7 +804,6 @@ static void upstream_write_char(struct ev_loop *loop, struct ev_io *watcher, int
 
 	struct sk_buff *skb = echo->sbuf;
 	// SKB_DUMP(skb);
-	unsigned int *length = (unsigned int*)skb->head;
 
 	if (EV_ERROR & revents) {
 		elog("invalid event");
