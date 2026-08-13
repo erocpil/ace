@@ -159,38 +159,24 @@ struct sk_buff *perf_exit(struct task *task)
 ssize_t perf_ctrl_rx(struct lsquic_stream_ctx *sc)
 {
 	struct sk_buff *skb = sc->rx;
-	struct upstream_skb_head *head = (struct upstream_skb_head*)skb->head;
+	struct upstream_skb_head head;
 
-	/* wait for head */
-	if (skb->len < sizeof(struct upstream_skb_head)) {
-		return 0;
+	/* decode the wire control frame (nego echo / done) */
+	int frame_status = task_frame_validate(skb->head, skb->len, &head);
+	if (frame_status == 0) {
+		return 0;   /* need more bytes */
+	}
+	if (frame_status < 0) {
+		return TASK_FAIL;   /* malformed */
 	}
 
-	/*
-	clog();
-	SKB_DUMP(sc->rx);
-	upstream_skb_head_dump(head);
-	*/
-
-	if (!head->length) {
-		if ((unsigned short int)-1 == head->theme) {
-			ylog("TASK_DONE");
-			return TASK_DONE;
-		}
+	if (task_frame_peek_flags(skb->head) & ACE_FRAME_FLAG_LAST) {
+		ylog("TASK_DONE");
+		return TASK_DONE;
 	}
 
-	/* check if whole head was received */
-	if (skb->len < sizeof(*head) + head->length) {
-		clog("skb->len %u head->length %u", skb->len, head->length);
-		return TASK_GOON;
-	}
-
-	ylog("length %u perf %u stream %u info %s",
-			head->length, head->theme, head->serial, (char*)(head + 1));
-	/*
-	upstream_skb_head_dump(head);
-	SKB_DUMP(skb);
-	*/
+	ylog("length %u perf %u stream %u",
+			head.length, head.theme, head.serial);
 	/* start each stream except stream 0 the control */
 	struct lsquic_conn *lconn = lsquic_stream_conn(sc->stream);
 	struct lsquic_conn_ctx *lconn_ctx = lsquic_conn_get_ctx(lconn);

@@ -156,9 +156,10 @@ ssize_t s0_rx_func(struct lsquic_stream_ctx *sc)
 ssize_t s0_tx_func(struct lsquic_stream_ctx *sc)
 {
 	struct sk_buff *skb = sc->tx;
-	struct upstream_skb_head *head = (struct upstream_skb_head*)skb->head;
-	if ((unsigned short int)-1 == head->theme) {
-		/* phase 2: a TASK_EXIT has been sent to RECV by s0 */
+	struct upstream_skb_head head;
+	if (task_frame_validate(skb->head, skb->len, &head) == 1 &&
+	    (task_frame_peek_flags(skb->head) & ACE_FRAME_FLAG_LAST)) {
+		/* phase 2: the done frame has been sent */
 		ylog("s0 done");
 		lsquic_stream_wantwrite(sc->stream, 0);
 		return TASK_DONE;
@@ -167,8 +168,6 @@ ssize_t s0_tx_func(struct lsquic_stream_ctx *sc)
 		lsquic_stream_wantwrite(sc->stream, 0);
 		return TASK_GOON;
 	}
-	ylog();
-	return TASK_GOON;
 }
 
 static struct subtask default_subtask = {

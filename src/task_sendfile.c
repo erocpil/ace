@@ -50,38 +50,24 @@ struct task *task_create_sendfile(unsigned short n)
 ssize_t sendfile_ctrl_rx(struct lsquic_stream_ctx *sc)
 {
 	struct sk_buff *skb = sc->rx;
-	struct upstream_skb_head *head = (struct upstream_skb_head*)skb->head;
+	struct upstream_skb_head head;
 
-	/* wait for head */
-	if (skb->len < sizeof(struct upstream_skb_head)) {
-		return 0;
+	/* decode the wire control frame (nego echo / done) */
+	int frame_status = task_frame_validate(skb->head, skb->len, &head);
+	if (frame_status == 0) {
+		return 0;   /* need more bytes */
+	}
+	if (frame_status < 0) {
+		return TASK_FAIL;   /* malformed */
 	}
 
-	/*
-	clog();
-	SKB_DUMP(sc->rx);
-	upstream_skb_head_dump(head);
-	*/
-
-	if (!head->length) {
-		if ((unsigned short int)-1 == head->theme) {
-			ylog("TASK_DONE");
-			return TASK_DONE;
-		}
+	if (task_frame_peek_flags(skb->head) & ACE_FRAME_FLAG_LAST) {
+		ylog("TASK_DONE");
+		return TASK_DONE;
 	}
 
-	/* check if whole head was received */
-	if (skb->len < sizeof(*head) + head->length) {
-		clog("skb->len %u head->length %u", skb->len, head->length);
-		return TASK_GOON;
-	}
-
-	ylog("length %u sendfile %u stream %u info %s",
-			head->length, head->theme, head->serial, (char*)(head + 1));
-	/*
-	upstream_skb_head_dump(head);
-	SKB_DUMP(skb);
-	*/
+	ylog("length %u sendfile %u stream %u",
+			head.length, head.theme, head.serial);
 
 	/* start each stream except stream 0 the control */
 	struct lsquic_conn *lconn = lsquic_stream_conn(sc->stream);
@@ -571,27 +557,24 @@ int sendfile_done(struct lsquic_stream_ctx *sc)
 		rlog("all done except s0");
 		/* all done, except s0 */
 		if (TASK_ROLE_RECV == task->role) {
-			/* notify sender */
+			/* notify sender with a wire frame flagged ACE_FRAME_FLAG_LAST */
 			struct lsquic_conn_ctx *lconn_ctx =
 				lsquic_conn_get_ctx(lsquic_stream_conn(sc->stream));
 			struct lsquic_stream_ctx *s0sc = lsquic_stream_get_ctx(lconn_ctx->s0);
 			struct sk_buff *skb = list_first_entry(&s0sc->txq, struct sk_buff, skb_node);
-			// SKB_DUMP(skb);
-			/* push data to head to send the whole buffer */
-			struct upstream_skb_head head = {
-				.length = 0,
-				.theme = (unsigned short int)(-1),
-				.serial = 0,
+			struct ace_frame f = {
+				.payload_len = 0,
+				.theme       = (uint16_t)task->type,
+				.stream_id   = 1,
+				.flags       = ACE_FRAME_FLAG_LAST,
+				.version     = ACE_PROTO_VERSION,
 			};
-			skb->len = sizeof(struct upstream_skb_head);
-			skb->tail = skb->len;
+			ace_frame_encode((unsigned char *)skb->head, &f);
 			skb->data = skb->head;
+			skb->len = ACE_FRAME_HDR_LEN;
+			skb->tail = skb->len;
 			skb->offset = 0;
-			memcpy(skb->head, &head, sizeof(head));
-			// lstream_ctx_add_txq(s0sc, skb);
 			lsquic_stream_wantwrite(lconn_ctx->s0, 1);
-			// upstream_skb_head_dump(&head);
-			// SKB_DUMP(skb);
 		}
 		return TASK_DONE;
 	}

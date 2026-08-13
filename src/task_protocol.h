@@ -138,6 +138,14 @@ static inline int task_frame_validate(const void *data, size_t available,
 	return 1;
 }
 
+/* Peek the wire frame's flags field.  task_frame_validate() returns only
+ * length/theme/serial (native upstream_skb_head); control-stream handlers use
+ * this to detect ACE_FRAME_FLAG_LAST ("done") without widening the struct. */
+static inline uint16_t task_frame_peek_flags(const void *data)
+{
+	return ace_rd16(((const struct ace_wire_frame *)data)->flags);
+}
+
 /* ------------------------------------------------------------------ */
 /* Payload validation (v1 codec)                                       */
 /* ------------------------------------------------------------------ */
