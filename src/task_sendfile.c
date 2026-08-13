@@ -321,6 +321,7 @@ int sendfile_init(struct task *task)
 		close(fd);
 		if ((void*)-1 == sft->data) {
 			eslog();
+			sft->data = NULL;
 			return -1;
 		} else {
 			log("mmap(%d %s)", fd, receive_file);
@@ -353,6 +354,7 @@ int sendfile_init(struct task *task)
 		struct stat st;
 		if (-1 == fstat(fd, &st)) {
 			elog("fstat(%d), %d %s", fd, errno, strerror(errno));
+			close(fd);
 			return -1;
 		} else {
 			;
@@ -367,6 +369,7 @@ int sendfile_init(struct task *task)
 		close(fd);
 		if ((void*)-1 == sft->data) {
 			eslog("mmap(%s)", file);
+			sft->data = NULL;
 			return -1;
 		} else {
 			log("mmap(%d %s)", fd, file);
