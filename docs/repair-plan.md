@@ -194,6 +194,7 @@ LSan 在不受 ptrace 限制的环境中运行完整可执行文件和集成测�
 - 修复 echo 生命周期：`upstream_echo_delete()` 统一为单一 destroy 入口（摘链 + 关 fd + 释放 rbuf/队列/自身），
   消除三处缺陷——accept/read_char 失败路径 free 未摘链导致的悬空指针、read_char/write_char ERROR 路径摘链未
   free 导致的泄漏、fd 关闭分散。删除死函数 `upstream_destroy_echo()`。
+- **该统一销毁入口一度引入两条事件循环 UAF，review 发现并已修正**（见下「事件循环 UAF 修正」）。
 - LSan 全量（`ACE_SANITIZER=leak` 构建 + `smoke-test.sh` 跑 server/client 握手 + probe + SIGTERM 优雅关闭）：
   修复 `service_func()` 重复 `service_init_cert_hash()` 导致的 cert_hash 泄漏（272 B）；修复后 server 退出码 0、
   无泄漏报告。单元 + 契约测试 28/28 无泄漏。
@@ -214,9 +215,19 @@ LSan 在不受 ptrace 限制的环境中运行完整可执行文件和集成测�
 扩为走 `perf_exit`/`sendfile_exit` 真实释放路径（LSan 下零泄漏）。
 
 **剩余所有权项**：`service_on_read/write` 的 TASK_EXIT/FAIL 路径与 `quic_connection.c` 状态机均不直接持有资源
-（task 归 `lconn_ctx->task`、由 `task->exit` 在 `on_conn_closed` 释放；conn 状态机为内嵌值类型），已核对无需改动；
-`lconn_ctx->internal`（echo 指针）在 `on_conn_closed` 后成悬空但 echo 由 upstream 侧单独管理、无后续解引用，仅记录。
+（task 归 `lconn_ctx->task`、由 `task->exit` 在 `on_conn_closed` 释放；conn 状态机为内嵌值类型），已核对无需改动。
 LSan 尚未接入 CI（P7 分解时加）。
+
+**事件循环 UAF 修正（review 反馈，2026-08-13）**：`upstream_echo_delete()` 统一销毁入口存在两条事件循环 UAF——
+
+- `upstream_accept` 失败路径 `ev_io_start` 后直接 free echo，未先 `ev_io_stop`，事件循环仍持有嵌入在已释放对象里的
+  watcher → 修复：`upstream_echo_delete()` 内部先 `ev_io_stop`（经 `echo->up->loop`），成为真正完整的单一销毁入口。
+- char-mode `EV_READ|EV_WRITE` 包装函数在 READ 分支释放 echo 后仍继续走 WRITE 分支，使用悬空 watcher → 修复：
+  `upstream_read_char()` 返回存活标志（0=存活 / 1=已销毁），`upstream_readwrite_char()` 检测到销毁即 return。
+- 顺带修复同源第三处：echo 释放后 `lconn_ctx->internal` 回指悬空 → `upstream_echo_delete()` 断开 echo↔connection 回链。
+
+注：ASan 无法覆盖 lsquic 集成路径（lsquic 库未用 ASan 编译，`lsquic_engine_new` 内即崩溃），此两条 UAF 靠代码审计 +
+功能性测试（smoke / fault-injection / connection-isolation）验证。
 
 **集成路径 sanitizer 覆盖缺口**（后续改进项，暂不改 CI）：
 
