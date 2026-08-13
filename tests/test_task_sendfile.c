@@ -52,5 +52,31 @@ int main(void)
 	sft->nego->type = strdup("application/octet-stream");
 	assert(sft->nego->path && sft->nego->file && sft->nego->type);
 	assert(sendfile_exit(t) == NULL);
+
+	/* A negotiation buffer that is too small must not retain any of the
+	 * owned string copies made before encoding. */
+	t = task_create_sendfile(2);
+	assert(t != NULL);
+	t->role = TASK_ROLE_SEND;
+	t->n_sub = 2;
+	struct upstream_skb_head head = {
+		.theme = TASK_THEME_SENDFILE,
+		.serial = 1,
+	};
+	t->data = &head;
+	sft = container_of(t, struct sendfile_task, task);
+	sft->source_path = strdup("/tmp/a.txt");
+	sft->type = strdup("application/octet-stream");
+	assert(sft->source_path && sft->type);
+	sft->path = "/tmp";
+	sft->file = "a.txt";
+	sft->length = 1;
+
+	struct sk_buff *small = skb_malloc(1);
+	assert(small != NULL);
+	assert(sendfile_nego(t, small) == -1);
+	assert(sft->nego == NULL);
+	skb_free(small);
+	assert(sendfile_exit(t) == NULL);
 	return 0;
 }

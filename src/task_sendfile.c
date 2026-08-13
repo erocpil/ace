@@ -440,6 +440,39 @@ int sendfile_init(struct task *task)
 }
 
 
+static void sendfile_nego_free(struct ace_sendfile_nego *nego)
+{
+	if (!nego)
+		return;
+
+	free((void *)nego->path);
+	free((void *)nego->file);
+	free((void *)nego->type);
+	free(nego);
+}
+
+static struct ace_sendfile_nego *sendfile_nego_dup(
+	const struct ace_sendfile_nego *source)
+{
+	struct ace_sendfile_nego *copy = calloc(1, sizeof(*copy));
+	if (!copy)
+		return NULL;
+
+	*copy = *source;
+	copy->path = NULL;
+	copy->file = NULL;
+	copy->type = NULL;
+	copy->path = strdup(source->path);
+	copy->file = strdup(source->file);
+	copy->type = strdup(source->type);
+	if (!copy->path || !copy->file || !copy->type) {
+		sendfile_nego_free(copy);
+		return NULL;
+	}
+
+	return copy;
+}
+
 int sendfile_nego(struct task *task, struct sk_buff* skb)
 {
 	struct sendfile_task *sft = container_of(task, struct sendfile_task, task);
@@ -467,9 +500,11 @@ int sendfile_nego(struct task *task, struct sk_buff* skb)
 		}
 
 		/* Dup strings into owned memory (wire buffer is temporary). */
-		nego->path = strdup(nego->path);
-		nego->file = strdup(nego->file);
-		nego->type = strdup(nego->type);
+		struct ace_sendfile_nego *owned = sendfile_nego_dup(nego);
+		free(nego);
+		if (!owned)
+			return -1;
+		nego = owned;
 
 		sendfile_nego_dump(nego);
 		sft->nego = nego;
@@ -489,13 +524,9 @@ int sendfile_nego(struct task *task, struct sk_buff* skb)
 	};
 
 	/* Allocate owned copy for internal use. */
-	struct ace_sendfile_nego *nego_copy = malloc(sizeof(*nego_copy));
+	struct ace_sendfile_nego *nego_copy = sendfile_nego_dup(&nego);
 	if (!nego_copy)
 		return -1;
-	*nego_copy = nego;
-	nego_copy->path = strdup(nego.path);
-	nego_copy->file = strdup(nego.file);
-	nego_copy->type = strdup(nego.type);
 
 	sendfile_nego_dump(nego_copy);
 
@@ -503,20 +534,20 @@ int sendfile_nego(struct task *task, struct sk_buff* skb)
 	struct upstream_skb_head *oh = (struct upstream_skb_head*)task->data;
 	size_t total = ace_sendfile_nego_encode(NULL, 0, oh->serial, nego_copy);
 	if (total == 0) {
-		free(nego_copy);
+		sendfile_nego_free(nego_copy);
 		return -1;
 	}
 
 	void *data = skb_reserve(skb, total);
 	if (!data) {
-		free(nego_copy);
+		sendfile_nego_free(nego_copy);
 		return -1;
 	}
 
 	total = ace_sendfile_nego_encode((unsigned char *)skb->head, total,
 					 oh->serial, nego_copy);
 	if (total == 0) {
-		free(nego_copy);
+		sendfile_nego_free(nego_copy);
 		return -1;
 	}
 
@@ -609,13 +640,8 @@ struct sk_buff *sendfile_exit(struct task *task)
 		free(sft->type);
 	}
 	/* nego owns strdup'd strings in both roles */
-	if (sft->nego) {
-		free((void *)sft->nego->path);
-		free((void *)sft->nego->file);
-		free((void *)sft->nego->type);
-		free(sft->nego);
-		sft->nego = NULL;
-	}
+	sendfile_nego_free(sft->nego);
+	sft->nego = NULL;
 	free(sft);
 	return NULL;
 }
@@ -640,5 +666,4 @@ struct subtask *task_get_sendfile_sub_next(struct task *t)
 	}
 	return sub;
 }
-
 
