@@ -136,4 +136,29 @@ size_t ace_probe_encode(unsigned char *buf, size_t bufsz,
 			uint16_t stream_id,
 			const struct ace_probe *probe);
 
+/* ------------------------------------------------------------------ */
+/* Sendfile resume bitmap (Phase 3: resume handshake)                  */
+/*                                                                     */
+/* Receiver answers a sendfile nego with a resume frame when it already
+ * holds some segments (metadata sidecar left from a prior interrupted
+ * transfer).  Payload is n_segments bytes, one per segment in chunk-plan
+ * order: 1 = complete + verified (skip), 0 = missing (retransmit).  The
+ * frame is carried on stream 0 with ACE_FRAME_FLAG_CONTROL.             */
+/* ------------------------------------------------------------------ */
+
+/* Decode a resume bitmap payload.  Returns 0 on success, -1 on malformed
+ * (bad length or a byte not in {0,1}).  *n_segments is the bitmap length;
+ * *bitmap points into buf. */
+int ace_sendfile_resume_decode(const unsigned char *buf, size_t buflen,
+			       uint16_t *n_segments,
+			       const unsigned char **bitmap);
+
+/* Encode frame (theme=SENDFILE, flags=CONTROL) + resume bitmap payload.
+ * A NULL buffer performs a dry-run and returns the required size.
+ * Returns total encoded length, or 0 on invalid input/overflow. */
+size_t ace_sendfile_resume_encode(unsigned char *buf, size_t bufsz,
+				  uint16_t stream_id,
+				  uint16_t n_segments,
+				  const unsigned char *bitmap);
+
 #endif /* ACE_PROTOCOL_CODEC_H */

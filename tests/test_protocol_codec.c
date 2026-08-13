@@ -93,5 +93,36 @@ int main(void)
 	memset(short_buf, 0, sizeof(short_buf));
 	assert(ace_frame_decode(short_buf, sizeof(short_buf), &f) == -1);
 
+	/* ---- 11. sendfile resume bitmap codec ---- */
+	unsigned char bitmap[4] = { 1, 0, 1, 1 };
+	size_t rs_total = ACE_FRAME_HDR_LEN + 4;
+	assert(ace_sendfile_resume_encode(NULL, 0, 1, 0, bitmap) == 0);       /* n_segments==0 */
+	assert(ace_sendfile_resume_encode(NULL, 0, 1, 4, NULL) == 0);         /* NULL bitmap */
+	assert(ace_sendfile_resume_encode(NULL, 0, 1, 4, bitmap) == rs_total);/* dry-run */
+	assert(ace_sendfile_resume_encode(probe_buf, rs_total - 1, 1, 4, bitmap) == 0);
+	assert(ace_sendfile_resume_encode(probe_buf, rs_total, 1, 4, bitmap) == rs_total);
+
+	struct ace_frame rf;
+	assert(ace_frame_decode(probe_buf, rs_total, &rf) == 0);
+	assert(rf.theme == 0);                       /* TASK_THEME_SENDFILE */
+	assert(rf.flags == ACE_FRAME_FLAG_CONTROL);
+	assert(rf.stream_id == 1);
+	assert(rf.payload_len == 4);
+
+	const unsigned char *dec_bitmap = NULL;
+	uint16_t dec_n = 0;
+	assert(ace_sendfile_resume_decode(probe_buf + ACE_FRAME_HDR_LEN, 4,
+					  &dec_n, &dec_bitmap) == 0);
+	assert(dec_n == 4);
+	assert(dec_bitmap[0] == 1 && dec_bitmap[1] == 0 &&
+	       dec_bitmap[2] == 1 && dec_bitmap[3] == 1);
+
+	/* reject non-binary bytes, empty, and oversized bitmaps */
+	unsigned char bad_bitmap[4] = { 1, 2, 0, 1 };
+	assert(ace_sendfile_resume_decode(bad_bitmap, 4, &dec_n, &dec_bitmap) == -1);
+	assert(ace_sendfile_resume_decode(bitmap, 0, &dec_n, &dec_bitmap) == -1);
+	unsigned char huge[ACE_MAX_TASK_STREAMS + 1];
+	assert(ace_sendfile_resume_decode(huge, sizeof(huge), &dec_n, &dec_bitmap) == -1);
+
 	return 0;
 }

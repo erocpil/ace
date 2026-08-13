@@ -273,3 +273,60 @@ size_t ace_probe_encode(unsigned char *buf, size_t bufsz,
 
 	return total;
 }
+
+/* ------------------------------------------------------------------ */
+/* Sendfile resume bitmap                                              */
+/* ------------------------------------------------------------------ */
+
+int ace_sendfile_resume_decode(const unsigned char *buf, size_t buflen,
+			       uint16_t *n_segments,
+			       const unsigned char **bitmap)
+{
+	if (!buf || buflen == 0 || buflen > ACE_MAX_TASK_STREAMS)
+		return -1;
+
+	for (size_t i = 0; i < buflen; i++) {
+		if (buf[i] != 0 && buf[i] != 1)
+			return -1;
+	}
+
+	if (n_segments)
+		*n_segments = (uint16_t)buflen;
+	if (bitmap)
+		*bitmap = buf;
+	return 0;
+}
+
+size_t ace_sendfile_resume_encode(unsigned char *buf, size_t bufsz,
+				  uint16_t stream_id,
+				  uint16_t n_segments,
+				  const unsigned char *bitmap)
+{
+	if (n_segments == 0 || n_segments > ACE_MAX_TASK_STREAMS || !bitmap)
+		return 0;
+
+	size_t total = ACE_FRAME_HDR_LEN + (size_t)n_segments;
+
+	/* buf==NULL is a dry-run: return required size without writing. */
+	if (!buf)
+		return total;
+
+	if (bufsz < total)
+		return 0;
+
+	unsigned char *p = buf;
+
+	struct ace_frame f = {
+		.payload_len = (uint32_t)n_segments,
+		.theme       = 0,  /* TASK_THEME_SENDFILE */
+		.stream_id   = stream_id,
+		.flags       = ACE_FRAME_FLAG_CONTROL,
+		.version     = ACE_PROTO_VERSION,
+	};
+	ace_frame_encode(p, &f);
+	p += ACE_FRAME_HDR_LEN;
+
+	memcpy(p, bitmap, n_segments);
+
+	return total;
+}

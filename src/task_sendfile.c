@@ -26,6 +26,7 @@ struct task *task_create_sendfile(unsigned short n)
 	memset(task, 0, task_size);
 	task->init = sendfile_init;
 	task->nego = sendfile_nego;
+	task->nego_ack = sendfile_nego_ack;
 	task->exit = sendfile_exit;
 
 	struct sendfile_task *sft = container_of(task, struct sendfile_task, task);
@@ -53,6 +54,49 @@ struct task *task_create_sendfile(unsigned short n)
 }
 
 
+/* Arm the SEND side's data streams for transmit.  Completed segments
+ * (resume_bitmap) are skipped and counted done (their write side is closed
+ * so the receiver sees EOF); the rest get their tx buffer pointed at the
+ * mmap and wantwrite.  Returns 0 on success, -1 on protocol error. */
+static int sendfile_arm_streams(struct sendfile_task *sft,
+				struct lsquic_conn_ctx *lconn_ctx)
+{
+	struct task *task = &sft->task;
+	unsigned short n_seg = (unsigned short)(task->n_sub - 1);
+	struct lsquic_stream_ctx *pos = NULL;
+
+	list_for_each_entry(pos, &lconn_ctx->running_stream_head, stream_node) {
+		struct sendfile_subtask *sfst = (struct sendfile_subtask*)pos->subtask;
+		int seg = (int)sfst->sub.no - 1;
+		if (seg < 0 || seg >= n_seg)
+			return -1;
+
+		if (sft->resuming && sft->resume_bitmap[seg]) {
+			/* Receiver already holds this segment: send nothing. */
+			sfst->length = 0;
+			sfst->data = NULL;
+			if (sfst->sub.done(pos) != TASK_DONE)
+				return -1;
+			lsquic_stream_wantwrite(pos->stream, 0);
+			lsquic_stream_shutdown(pos->stream, 1);
+			clog("stream %p seg %d already complete, skipped",
+			     pos->stream, seg);
+			continue;
+		}
+
+		struct sk_buff *skb = pos->tx;
+		skb->head = sfst->data;
+		skb->data = skb->head;
+		skb->len = sfst->length;
+		skb->tail = skb->len;
+		skb->end = skb->len;
+		skb->offset = 0;
+		lsquic_stream_wantwrite(pos->stream, 1);
+	}
+
+	return 0;
+}
+
 ssize_t sendfile_ctrl_rx(struct lsquic_stream_ctx *sc)
 {
 	struct sk_buff *skb = sc->rx;
@@ -67,13 +111,14 @@ ssize_t sendfile_ctrl_rx(struct lsquic_stream_ctx *sc)
 		return TASK_FAIL;   /* malformed */
 	}
 
-	if (task_frame_peek_flags(skb->head) & ACE_FRAME_FLAG_LAST) {
+	uint16_t flags = task_frame_peek_flags(skb->head);
+	if (flags & ACE_FRAME_FLAG_LAST) {
 		ylog("TASK_DONE");
 		return TASK_DONE;
 	}
 
-	ylog("length %u sendfile %u stream %u",
-			head.length, head.theme, head.serial);
+	ylog("length %u sendfile %u stream %u flags %u",
+			head.length, head.theme, head.serial, flags);
 
 	/* start each stream except stream 0 the control */
 	struct lsquic_conn *lconn = lsquic_stream_conn(sc->stream);
@@ -81,24 +126,35 @@ ssize_t sendfile_ctrl_rx(struct lsquic_stream_ctx *sc)
 	if (!lconn_ctx || sc->stream != lconn_ctx->s0 || !lconn_ctx->task) {
 		return TASK_FAIL;
 	}
+	struct task *task = (struct task*)lconn_ctx->task;
+	struct sendfile_task *sft =
+		container_of(task, struct sendfile_task, task);
 	struct lsquic_stream_ctx *pos = NULL;
-	if (TASK_ROLE_SEND == ((struct task*)lconn_ctx->task)->role) {
-		list_for_each_entry(pos, &lconn_ctx->running_stream_head, stream_node) {
-			struct sendfile_subtask *sfst = (struct sendfile_subtask*)pos->subtask;
-			struct sk_buff *skb = pos->tx;
-			clog("stream %p subtask %p write on %p length %d",
-					pos->stream, sfst, skb->data, skb->len);
-			/* set tx buffer to mmap()ed area */
-			skb->head = sfst->data;
-			skb->data = skb->head;
-			skb->len = sfst->length;
-			skb->tail = skb->len;
-			skb->end = skb->len;
-			skb->offset = 0;
-			clog("stream %p sc %p subtask %p read on %p length %d",
-					pos->stream, pos, sfst, skb->data, skb->len);
-			lsquic_stream_wantwrite(pos->stream, 1);
-		}
+
+	if (flags & ACE_FRAME_FLAG_CONTROL) {
+		/* Resume bitmap frame — SEND side only.  Decode the per-segment
+		 * done flags, then arm only the missing segments. */
+		if (task->role != TASK_ROLE_SEND)
+			return TASK_FAIL;
+		const unsigned char *bitmap = NULL;
+		uint16_t n_seg = 0;
+		if (ace_sendfile_resume_decode(skb->head + ACE_FRAME_HDR_LEN,
+					       head.length, &n_seg, &bitmap) != 0)
+			return TASK_FAIL;
+		if (n_seg != task->n_sub - 1)
+			return TASK_FAIL;
+		memcpy(sft->resume_bitmap, bitmap, n_seg);
+		sft->resuming = 1;
+		ylog("resume bitmap received: %u segments", n_seg);
+		if (sendfile_arm_streams(sft, lconn_ctx) != 0)
+			return TASK_FAIL;
+		/* SEND resets the control-stream rx buffer. */
+		sc->rx->len = 0;
+		sc->rx->tail = 0;
+		sc->rx->data = sc->rx->head;
+	} else if (TASK_ROLE_SEND == task->role) {
+		if (sendfile_arm_streams(sft, lconn_ctx) != 0)
+			return TASK_FAIL;
 		/* TASK_ROLE_SEND should reset skb */
 		sc->rx->len = 0;
 		sc->rx->tail = 0;
@@ -106,6 +162,12 @@ ssize_t sendfile_ctrl_rx(struct lsquic_stream_ctx *sc)
 	} else {
 		list_for_each_entry(pos, &lconn_ctx->pending_stream_head, stream_node) {
 			struct sendfile_subtask *sfst = (struct sendfile_subtask*)pos->subtask;
+			if (sft->resuming &&
+			    sft->resume_bitmap[(int)sfst->sub.no - 1]) {
+				/* Already complete: leave the default rx buffer so
+				 * the stream's EOF is handled normally. */
+				continue;
+			}
 			struct sk_buff *skb = pos->rx;
 			clog("stream %p subtask %p write on %p length %d",
 					pos->stream, sfst, skb->data, skb->len);
@@ -330,6 +392,91 @@ static int sendfile_meta_record(struct sendfile_task *sft, int seg_index,
 	return 0;
 }
 
+/* Load the metadata sidecar and fill sft->resume_bitmap with per-segment
+ * done flags.  A segment is marked complete only if the metadata record is
+ * flagged done, its .part exists with the recorded size, and its content
+ * still verifies against the recorded checksum.  Returns:
+ *   1  metadata present and matched this transfer (bitmap filled)
+ *   0  no usable metadata — fresh transfer (bitmap left as-is)
+ *  -1  I/O error reading metadata (caller aborts) */
+static int sendfile_meta_load(struct sendfile_task *sft, int n_segments)
+{
+	char meta_path[PATH_MAX];
+	if (sendfile_meta_path(meta_path, sizeof(meta_path), sft->file) != 0)
+		return -1;
+
+	int fd = open(meta_path, O_RDONLY);
+	if (fd < 0) {
+		if (errno == ENOENT)
+			return 0;   /* no prior transfer */
+		eslog("open(%s)", meta_path);
+		return -1;
+	}
+
+	struct ace_sf_meta_hdr hdr;
+	if (read(fd, &hdr, sizeof(hdr)) != (ssize_t)sizeof(hdr)) {
+		close(fd);
+		return -1;
+	}
+
+	/* The header must describe exactly this transfer. */
+	if (memcmp(hdr.magic, ACE_SF_META_MAGIC, 4) != 0 ||
+	    hdr.version != ACE_SF_META_VERSION ||
+	    hdr.n_segments != (uint16_t)n_segments ||
+	    hdr.file_length != (uint32_t)sft->length) {
+		close(fd);
+		return 0;   /* stale / mismatched: start over */
+	}
+
+	memset(sft->resume_bitmap, 0, sizeof(sft->resume_bitmap));
+	for (int k = 0; k < n_segments; k++) {
+		struct ace_sf_meta_seg seg;
+		if (read(fd, &seg, sizeof(seg)) != (ssize_t)sizeof(seg)) {
+			close(fd);
+			return -1;
+		}
+		if (!seg.done)
+			continue;
+
+		char part_path[PATH_MAX];
+		if (sendfile_part_path(part_path, sizeof(part_path),
+				       sft->file, k) != 0) {
+			close(fd);
+			return -1;
+		}
+
+		/* The part must exist with the recorded size, and its content
+		 * must still verify.  Re-checksums the whole segment, so resume
+		 * validation is O(bytes already transferred). */
+		int pfd = open(part_path, O_RDONLY | O_NOFOLLOW);
+		if (pfd < 0)
+			continue;
+		struct stat st;
+		if (fstat(pfd, &st) != 0 || st.st_size != (off_t)seg.size) {
+			close(pfd);
+			continue;
+		}
+		if (seg.size > 0) {
+			void *p = mmap(NULL, seg.size, PROT_READ, MAP_SHARED, pfd, 0);
+			if (p == MAP_FAILED) {
+				close(pfd);
+				continue;
+			}
+			uint32_t cksum = task_checksum32(p, seg.size);
+			munmap(p, seg.size);
+			if (cksum != seg.checksum) {
+				close(pfd);
+				continue;
+			}
+		}
+		close(pfd);
+		sft->resume_bitmap[k] = 1;
+	}
+
+	close(fd);
+	return 1;
+}
+
 /* Concatenate all .part files into the final file, in segment order. */
 static int sendfile_concat(struct sendfile_task *sft, int n_segments)
 {
@@ -471,6 +618,22 @@ int sendfile_init(struct task *task)
 		}
 		const struct ace_sendfile_chunk *chunks = sft->nego->chunks;
 
+		/* Phase 3: detect a prior partial transfer.  resume_bitmap is
+		 * filled with done flags only for segments whose .part exists,
+		 * matches the recorded size, and still verifies. */
+		int meta_status = sendfile_meta_load(sft, (int)n_sub_data);
+		if (meta_status < 0)
+			return -1;
+		int n_done = 0;
+		for (int k = 0; k < n_sub_data; k++)
+			n_done += sft->resume_bitmap[k] != 0;
+		/* Resume only when there is at least one complete and one missing
+		 * segment.  All-zero (fresh) or all-done (already fully
+		 * transferred) fall back to a clean retransfer. */
+		sft->resuming = (n_done > 0 && n_done < n_sub_data);
+		if (!sft->resuming)
+			memset(sft->resume_bitmap, 0, sizeof(sft->resume_bitmap));
+
 		/* subtask 0 is for stream 0; each data stream writes its own
 		 * contiguous segment to a separate .part file. */
 		sft->index = 1;
@@ -478,6 +641,13 @@ int sendfile_init(struct task *task)
 			struct sendfile_subtask *sfst = &sft->sfst[k + 1];
 			sfst->length = chunks[k].size;
 			sfst->offset = chunks[k].offset;
+			if (sft->resume_bitmap[k]) {
+				/* Already complete + verified: keep the .part,
+				 * skip the mmap, count it done up front. */
+				sfst->data = NULL;
+				task->n_sub_done++;
+				continue;
+			}
 			if (chunks[k].size == 0) {
 				sfst->data = NULL;
 				continue;
@@ -518,8 +688,11 @@ int sendfile_init(struct task *task)
 			log("mmap part %s", part_path);
 		}
 
-		/* Write the metadata sidecar header + zeroed segment records. */
-		if (sendfile_meta_init(sft, n_sub_data, chunks) != 0)
+		/* Write the metadata sidecar header + zeroed segment records on a
+		 * fresh transfer.  On resume the existing sidecar is preserved so
+		 * completed segments stay recorded. */
+		if (!sft->resuming &&
+		    sendfile_meta_init(sft, n_sub_data, chunks) != 0)
 			return -1;
 		return 0;
 	} else {
@@ -749,6 +922,37 @@ int sendfile_nego(struct task *task, struct sk_buff* skb)
 	return 0;
 }
 
+int sendfile_nego_ack(struct task *task, struct sk_buff *tx, struct sk_buff *rx)
+{
+	struct sendfile_task *sft = container_of(task, struct sendfile_task, task);
+
+	if (!sft->resuming) {
+		/* Fresh transfer: echo the nego back verbatim. */
+		if (tx->end < rx->len)
+			return -1;
+		memcpy(tx->head, rx->head, rx->len);
+		tx->data = tx->head;
+		tx->len = rx->len;
+		tx->tail = rx->len;
+		tx->offset = 0;
+		return 0;
+	}
+
+	/* Resume: answer with an ACE_FRAME_FLAG_CONTROL resume bitmap. */
+	ylog("resume: answering nego with %u-segment bitmap",
+	     task->n_sub - 1);
+	size_t n = ace_sendfile_resume_encode(tx->head, tx->end, 1,
+					      (uint16_t)(task->n_sub - 1),
+					      sft->resume_bitmap);
+	if (n == 0)
+		return -1;
+	tx->data = tx->head;
+	tx->len = (unsigned int)n;
+	tx->tail = tx->len;
+	tx->offset = 0;
+	return 0;
+}
+
 /** sendfile_done - the way a task exits
  *
  * @Return: 0 do nothing, 1 shutdown stream read/write
@@ -823,14 +1027,15 @@ struct sk_buff *sendfile_exit(struct task *task)
 				munmap(sfst->data, sfst->length);
 			sfst->data = NULL;
 		}
-		/* concatenate on success; drop parts + metadata either way */
+		/* Concatenate on success and drop parts + metadata.  On an
+		 * incomplete transfer keep them so the next attempt can resume. */
 		if (task->n_sub_done >= task->n_sub) {
 			if (sendfile_concat(sft, n_sub_data) != 0)
 				eslog("concat failed; leaving .part files for recovery");
 			else
 				sendfile_cleanup_parts(sft, n_sub_data);
 		} else {
-			sendfile_cleanup_parts(sft, n_sub_data);
+			blog("transfer incomplete; keeping .part files + metadata for resume");
 		}
 		free(sft->path);
 		free(sft->file);

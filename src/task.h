@@ -93,6 +93,12 @@ struct task {
 	void *data;
 	int (*init)(struct task*);
 	int (*nego)(struct task*, struct sk_buff*);
+	/* RECV-only: after nego+init, write the stream-0 reply into tx.
+	 * NULL means "echo the received nego back verbatim" (legacy).  rx is
+	 * the received nego frame (needed for the echo copy).  Returns 0 on
+	 * success, -1 on failure.  Used by tasks that answer negotiation with
+	 * something other than an echo (e.g. sendfile resume bitmap). */
+	int (*nego_ack)(struct task*, struct sk_buff *tx, struct sk_buff *rx);
 	struct sk_buff *(*exit)(struct task*);
 	unsigned long start;
 	unsigned long end;

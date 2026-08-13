@@ -147,3 +147,9 @@ jobs:
           ACE_IP_VERSION: ${{ matrix.ip_version }}
           ACE_UPSTREAM_FILE: /tmp/ci-client.sock
         run: bash scripts/multi-command-test.sh
+      - name: Resume handshake regression
+        env:
+          ACE_BUILD_DIR: build/ci
+          ACE_IP_VERSION: ${{ matrix.ip_version }}
+          ACE_UPSTREAM_FILE: /tmp/ci-client.sock
+        run: bash scripts/resume-test.sh

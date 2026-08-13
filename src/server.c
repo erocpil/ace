@@ -93,24 +93,34 @@ ssize_t s0_rx_func(struct lsquic_stream_ctx *sc)
 
 			ylog("task %p lconn_ctx %p", task, lconn_ctx);
 
-			/* echo the request back to start xmit */
+			/* reply to start xmit: default is to echo the nego back
+			 * verbatim; a task may override with nego_ack (e.g.
+			 * sendfile's resume bitmap). */
 			struct sk_buff *tx = list_first_entry(&sc->txq, struct sk_buff, skb_node);
 			if (skb->len != skb->tail) {
 				return -1;
 			}
-			if (tx->end >= skb->end) {
-				tx->end = skb->end;
+			if (task->nego_ack) {
+				if (task->nego_ack(task, tx, skb) != 0) {
+					elog("task->nego_ack() failed, aborting stream");
+					task->exit(task);
+					return -1;
+				}
 			} else {
-				rlog("%u %u tx pool too small, aborting stream", tx->end, skb->end);
-				return -1;
+				if (tx->end >= skb->end) {
+					tx->end = skb->end;
+				} else {
+					rlog("%u %u tx pool too small, aborting stream", tx->end, skb->end);
+					return -1;
+				}
+				tx->len = skb->len;
+				tx->tail = skb->tail;
+				memcpy(sc->tx->head, sc->rx->head, skb->len);
+				tx->data = tx->head;
+				tx->offset = 0; /* clear offset to start over */
+				SKB_DUMP(tx);
+				clog("copy rx to tx and echo back");
 			}
-			tx->len = skb->len;
-			tx->tail = skb->tail;
-			memcpy(sc->tx->head, sc->rx->head, skb->len);
-			tx->data = tx->head;
-			tx->offset = 0; /* clear offset to start over */
-			SKB_DUMP(tx);
-			clog("copy rx to tx and echo back");
 			lsquic_stream_wantwrite(sc->stream, 1);
 			blog("prepare to received file with %u stream including s0", task->n_sub);
 
