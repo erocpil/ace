@@ -203,6 +203,21 @@ static void upstream_echo_delete(struct upstream_echo *echo)
 	}
 	clog("echo %p n_rq %u n_tq %u", echo, echo->n_rq, echo->n_sq);
 
+	/* Stop the watcher so the event loop no longer references the echo's
+	 * embedded watcher once it is freed (no-op if inactive/unlinked). */
+	if (echo->up && echo->up->loop) {
+		ev_io_stop(echo->up->loop, &echo->w);
+	}
+
+	/* Break the echo <-> connection back-link so the connection's internal
+	 * pointer never dangles after this free. */
+	if (echo->external) {
+		struct lsquic_conn_ctx *lc = (struct lsquic_conn_ctx *)echo->external;
+		if (lc->internal == echo) {
+			lc->internal = NULL;
+		}
+	}
+
 	/* Remove from the upstream's echo list, if it was ever linked. */
 	if (echo->up) {
 		upstream_del_echo(echo->up, echo);
@@ -655,7 +670,7 @@ void upstream_free(struct upstream *up)
 	free(up);
 }
 
-static void upstream_read_char(struct ev_loop *loop, struct ev_io *watcher, int revents)
+static int upstream_read_char(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	ssize_t n = 0;
 	int fd = watcher->fd;
@@ -667,7 +682,7 @@ static void upstream_read_char(struct ev_loop *loop, struct ev_io *watcher, int 
 
 	if (EV_ERROR & revents) {
 		elog("invalid event");
-		return;
+		return 0;
 	}
 
 	ev_io_stop(loop, watcher);
@@ -706,7 +721,7 @@ static void upstream_read_char(struct ev_loop *loop, struct ev_io *watcher, int 
 			if (upstream_call_rx_process_func(echo) < 0) {
 				upstream_echo_delete(echo);
 				elog("upstream_call_rx_process_func()");
-				return;
+				return 1;
 			}
 
 			/* best-effort echo of the raw command line */
@@ -730,29 +745,30 @@ static void upstream_read_char(struct ev_loop *loop, struct ev_io *watcher, int 
 			*offset = 0;
 		}
 
-		return;
+		return 0;
 	} else if (!n) {
 		eslog("read(%d 0), close", fd);
 		goto ERROR;
 	} else if (n < 0) {
 		if (EAGAIN == errno || EWOULDBLOCK == errno || EINTR == errno) {
-			return;
+			return 0;
 		}
 		eslog("read(%d)", echo->fd);
 		goto ERROR;
 	}
 
-	return;
+	return 0;
 
 ERROR:
 	echo->valid = 0;
 	if (EBADF == errno) { /* fd may be closed previously */
-		return;
+		return 0;
 	}
 	ev_io_stop(loop, watcher);
 	ylog("stop echo %p(%p %p) loop %p watcher %p",
 			echo, echo->up->loop, &echo->w, loop, watcher);
 	upstream_echo_delete(echo);
+	return 1;
 }
 
 static void upstream_write_char(struct ev_loop *loop, struct ev_io *watcher, int revents)
@@ -874,7 +890,8 @@ void upstream_readwrite_char(struct ev_loop *loop, struct ev_io *watcher, int re
 	}
 
 	if (revents & EV_READ) {
-		upstream_read_char(loop, watcher, revents);
+		if (upstream_read_char(loop, watcher, revents))
+			return;   /* echo destroyed — do not reuse the watcher */
 	}
 	if (revents & EV_WRITE) {
 		upstream_write_char(loop, watcher, revents);
