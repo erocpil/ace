@@ -38,6 +38,9 @@ int main(void)
 	 * per-subtask access is the supported path (see task_get_perf_sub_at). */
 	assert(task_get_perf_sub_next(t) == NULL);
 
-	free(t);
+	/* perf_exit must free the per-subtask buffers allocated by perf_init
+	 * and the task itself (verified leak-free under the LSan build). */
+	assert(perf_init(t) == 0);
+	assert(perf_exit(t) == NULL);
 	return 0;
 }

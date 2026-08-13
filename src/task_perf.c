@@ -148,8 +148,21 @@ int perf_nego(struct task *task, struct sk_buff* skb)
 
 struct sk_buff *perf_exit(struct task *task)
 {
-	(void)task;
-	return 0;
+	struct perf_task *pft = container_of(task, struct perf_task, task);
+	task_exit(task);
+
+	/* Free per-subtask data buffers allocated in perf_init(). */
+	for (unsigned short int i = 1; i < task->n_sub; i++) {
+		free(pft->pfst[i].data);
+		pft->pfst[i].data = NULL;
+	}
+
+	/* Free the negotiation struct (perf nego owns no strings). */
+	free(pft->nego);
+	pft->nego = NULL;
+
+	free(pft);
+	return NULL;
 }
 
 ssize_t perf_ctrl_rx(struct lsquic_stream_ctx *sc)

@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include <assert.h>
 #include <stdlib.h>
+#include <string.h>
 #include "task_sendfile.h"
 
 int main(void)
@@ -41,6 +42,15 @@ int main(void)
 	assert(task_get_sendfile_sub_next(t) != NULL);   /* stream 2 */
 	assert(task_get_sendfile_sub_next(t) == NULL);   /* exhausted */
 
-	free(t);
+	/* sendfile_exit must free the nego struct + its strdup'd strings and
+	 * the task itself (verified leak-free under the LSan build). */
+	struct sendfile_task *sft = container_of(t, struct sendfile_task, task);
+	sft->nego = calloc(1, sizeof(*sft->nego));
+	assert(sft->nego != NULL);
+	sft->nego->path = strdup("/tmp");
+	sft->nego->file = strdup("a.txt");
+	sft->nego->type = strdup("application/octet-stream");
+	assert(sft->nego->path && sft->nego->file && sft->nego->type);
+	assert(sendfile_exit(t) == NULL);
 	return 0;
 }

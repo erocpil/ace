@@ -604,7 +604,14 @@ struct sk_buff *sendfile_exit(struct task *task)
 	} else {
 		free(sft->source_path);
 		free(sft->type);
+	}
+	/* nego owns strdup'd strings in both roles */
+	if (sft->nego) {
+		free((void *)sft->nego->path);
+		free((void *)sft->nego->file);
+		free((void *)sft->nego->type);
 		free(sft->nego);
+		sft->nego = NULL;
 	}
 	free(sft);
 	return NULL;
