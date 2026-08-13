@@ -61,6 +61,11 @@ enum control_parse_status control_command_parse(
 	size_t consumed_len = 0;
 	int terminated = 0;
 
+	/* consumed and output are required out-parameters; NULL is a caller bug,
+	 * not a parse condition, so fail closed rather than crash. */
+	if (!consumed || !output)
+		return CONTROL_PARSE_INVALID;
+
 	*consumed = 0;
 	*output = NULL;
 

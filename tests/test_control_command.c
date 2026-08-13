@@ -205,6 +205,27 @@ static void test_response_encode(void)
 	skb_free(skb);
 }
 
+static void test_null_params(void)
+{
+	const unsigned char *cmd = (const unsigned char*)"sf 3 /x\n";
+	size_t consumed = 0;
+	struct sk_buff *out = NULL;
+
+	/* NULL consumed -> INVALID, no crash */
+	assert(control_command_parse(cmd, strlen((const char*)cmd),
+				     NULL, &out) == CONTROL_PARSE_INVALID);
+	assert(out == NULL);
+
+	/* NULL output -> INVALID, no crash */
+	assert(control_command_parse(cmd, strlen((const char*)cmd),
+				     &consumed, NULL) == CONTROL_PARSE_INVALID);
+
+	/* NULL input -> INCOMPLETE, no crash */
+	assert(control_command_parse(NULL, 5, &consumed, &out) ==
+	       CONTROL_PARSE_INCOMPLETE);
+	assert(out == NULL);
+}
+
 int main(void)
 {
 	test_parse_basics();
@@ -212,5 +233,6 @@ int main(void)
 	test_parse_multi_and_segmented();
 	test_parse_overlong();
 	test_response_encode();
+	test_null_params();
 	return 0;
 }

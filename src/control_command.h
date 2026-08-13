@@ -27,13 +27,14 @@ enum control_parse_status {
 /*
  * control_command_parse - parse one command line from a byte buffer.
  *
- * @input      raw bytes (NOT assumed NUL-terminated)
+ * @input      raw bytes (NOT assumed NUL-terminated); NULL means empty input
  * @input_len  number of valid bytes in @input
  * @consumed   out: bytes consumed from @input (line + terminator); 0 when
- *             CONTROL_PARSE_INCOMPLETE
+ *             CONTROL_PARSE_INCOMPLETE.  REQUIRED (non-NULL).
  * @output     out: on CONTROL_PARSE_OK, a freshly allocated sk_buff holding a
  *             native struct upstream_skb_head followed by the NUL-terminated
  *             payload; caller owns it (skb_free).  NULL on INCOMPLETE/INVALID.
+ *             REQUIRED (non-NULL).
  *
  * Grammar:  <command> SP <serial> [SP <payload>] (CR? LF)
  *   command  one of the known control commands (see table below)
