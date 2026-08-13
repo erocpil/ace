@@ -321,19 +321,14 @@ docs/assessments/            — 不可变历史快照（YYYY-MM-DD.md）
 
 ## 已知死代码与遗留清理项
 
-P5 控制面拆分时发现，暂未处理，记录待办：
+P5 控制面拆分时发现，全部已处理：
 
-- `src/upstream.c` 的 `upstream_accept_un()`（static，约 40 行）是死代码：`upstream_listen()` 注册的是
-  `upstream_accept()`，后者同时处理 TCP 与 Unix socket 的 accept。`upstream_accept_un` 从未被引用。
-  附带问题：`upstream_accept()` 对 Unix socket 连接仍用 `struct sockaddr_in` 读取对端地址，类型不匹配
-  （仅影响 `inet_ntoa` 日志，不影响 accept 结果）。处理选项：删除死函数；或把 accept 地址类型改为
-  `sockaddr_storage` 统一处理。
-- `src/upstream.c` 的 `upstream_write_char()` 内有原作者遗留的未使用局部变量 `unsigned int *length`
-  （`(unsigned int*)skb->head`），无任何读取，可直接删除。
-
-另有一项独立功能债（非死代码，已在 P1「client/server 生命周期不对称」项下记录）：SEND 侧 `task->data`
-仍是 native `upstream_skb_head` 布局、client upstream 仍发 native 结构，与 RECV 侧 wire codec 不对称，
-端到端文件传输尚未打通。作为独立问题处理，不在死代码清理范围。
+- ✅（`7bda312`）删除 `src/upstream.c` 的死函数 `upstream_accept_un()`；`upstream_accept()` 改用
+  `sockaddr_storage` 按 family 分支日志，Unix socket 对端不再被误当 INET 地址读。
+- ✅（`7bda312`）删除 `upstream_write_char()` 的未使用局部变量 `unsigned int *length`。
+- ✅（`8161579` + `0ef9057`）SEND/RECV wire 不对称：SEND 侧 nego 现在按 wire 编码、控制流改用
+  `task_frame_validate` 解析、done 信号改用 `ACE_FRAME_FLAG_LAST`。端到端文件传输已打通，
+  `scripts/file-transfer-test.sh` 稳定 PASS。
 
 ---
 
