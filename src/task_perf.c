@@ -119,28 +119,19 @@ int perf_nego(struct task *task, struct sk_buff* skb)
 	nego->code = 1;
 	nego->dual = 1;
 
-	/* Encode to wire */
+	/* Encode the wire frame at skb->head and set data/len explicitly,
+	 * mirroring the probe path. */
 	struct upstream_skb_head *oh = (struct upstream_skb_head*)task->data;
-	size_t total = ace_perf_nego_encode(NULL, 0, oh->serial, nego);
+	size_t total = ace_perf_nego_encode((unsigned char *)skb->head,
+					    skb->end, oh->serial, nego);
 	if (total == 0) {
 		free(nego);
 		return -1;
 	}
-
-	void *data = skb_reserve(skb, total);
-	if (!data) {
-		free(nego);
-		return -1;
-	}
-
-	total = ace_perf_nego_encode((unsigned char *)skb->head, total,
-				     oh->serial, nego);
-	if (total == 0) {
-		free(nego);
-		return -1;
-	}
-
-	skb_put(skb, total);
+	skb->data = skb->head;
+	skb->len = (unsigned int)total;
+	skb->tail = skb->len;
+	skb->offset = 0;
 	pft->nego = nego;
 
 	return 0;

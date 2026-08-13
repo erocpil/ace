@@ -343,8 +343,7 @@ static int client_process_upstream_read(struct upstream_echo *echo)
 			continue;
 		}
 
-		/* push data to head to send the whole buffer */
-		skb_push(sc->tx, sizeof(*head));
+		/* the nego already wrote the wire frame at tx->head; send it */
 		SKB_DUMP(sc->tx);
 		sc->subtask = task_get_sub_at(task, 0);
 		lsquic_stream_wantwrite(lconn_ctx->s0, 1);
@@ -748,6 +747,9 @@ void client_on_hsk_done(lsquic_conn_t *conn, enum lsquic_hsk_status status)
 					if (echo) {
 						ylog("echo back");
 						client_process_upstream_write(echo, skb);
+						/* drain upstream requests queued while the
+						 * conn was still handshaking (s0 not ready). */
+						client_process_upstream_read(echo);
 					} else {
 						skb_free(skb);
 					}
@@ -786,6 +788,9 @@ void client_on_hsk_done(lsquic_conn_t *conn, enum lsquic_hsk_status status)
 					if (echo) {
 						ylog("echo back");
 						client_process_upstream_write(echo, skb);
+						/* drain upstream requests queued while the
+						 * conn was still handshaking (s0 not ready). */
+						client_process_upstream_read(echo);
 					} else {
 						skb_free(skb);
 					}

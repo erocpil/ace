@@ -530,30 +530,20 @@ int sendfile_nego(struct task *task, struct sk_buff* skb)
 
 	sendfile_nego_dump(nego_copy);
 
-	/* Encode to wire. */
+	/* Encode the wire frame at skb->head and set data/len explicitly,
+	 * mirroring the probe path (client_on_new_stream). */
 	struct upstream_skb_head *oh = (struct upstream_skb_head*)task->data;
-	size_t total = ace_sendfile_nego_encode(NULL, 0, oh->serial, nego_copy);
+	size_t total = ace_sendfile_nego_encode((unsigned char *)skb->head,
+						skb->end, oh->serial, nego_copy);
 	if (total == 0) {
 		sendfile_nego_free(nego_copy);
 		return -1;
 	}
+	skb->data = skb->head;
+	skb->len = (unsigned int)total;
+	skb->tail = skb->len;
+	skb->offset = 0;
 
-	void *data = skb_reserve(skb, total);
-	if (!data) {
-		sendfile_nego_free(nego_copy);
-		return -1;
-	}
-
-	total = ace_sendfile_nego_encode((unsigned char *)skb->head, total,
-					 oh->serial, nego_copy);
-	if (total == 0) {
-		sendfile_nego_free(nego_copy);
-		return -1;
-	}
-
-	skb_put(skb, total);
-
-	upstream_skb_head_dump((struct upstream_skb_head*)skb->head);
 	sft->nego = nego_copy;
 
 	return 0;

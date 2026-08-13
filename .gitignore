@@ -56,3 +56,6 @@ build/
 .deps/
 session/
 core
+
+# Runtime output (file-transfer receive root)
+received/
