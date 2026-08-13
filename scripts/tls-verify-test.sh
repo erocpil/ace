@@ -14,6 +14,7 @@ cleanup() {
     rm -f /tmp/test-ca.key /tmp/test-ca.pem /tmp/test-ca.srl
     rm -f /tmp/test-ca2.key /tmp/test-ca2.pem
     rm -f /tmp/test-server.key /tmp/test-server.csr /tmp/test-server.pem
+    rm -f /tmp/test-expired.key /tmp/test-expired.csr /tmp/test-expired.pem
     rm -f /tmp/tls-test-*.log
 }
 trap cleanup EXIT
@@ -51,7 +52,8 @@ if ! kill -0 $SERVER_PID 2>/dev/null; then
     fail "server died — check /tmp/tls-test-server.log"
 fi
 
-timeout 5 $CLIENT_BIN 0 > /tmp/tls-test-client.log 2>&1; CLIENT_RC=$?
+CLIENT_RC=0
+timeout 5 $CLIENT_BIN 0 > /tmp/tls-test-client.log 2>&1 || CLIENT_RC=$?
 sleep 1
 
 if [ $CLIENT_RC -ne 0 ] && grep -q 'TLS peer verification enabled' /tmp/tls-test-client.log 2>/dev/null; then
@@ -89,7 +91,8 @@ export ACE_HOSTNAME=wronghost.example.com
 $SERVER_BIN 1 > /tmp/tls-test-server2.log 2>&1 &
 SERVER_PID=$!
 sleep 1
-timeout 5 $CLIENT_BIN 0 > /tmp/tls-test-client2.log 2>&1; CLIENT_RC=$?
+CLIENT_RC=0
+timeout 5 $CLIENT_BIN 0 > /tmp/tls-test-client2.log 2>&1 || CLIENT_RC=$?
 
 if grep -qi 'hostname mismatch\|hostname.*verified\|certificate.*failed\|self.signed\|cert.*verify' /tmp/tls-test-client2.log 2>/dev/null; then
     pass "hostname mismatch detected and rejected"
@@ -123,7 +126,8 @@ export ACE_HOSTNAME=localhost
 $SERVER_BIN 1 > /tmp/tls-test-server3.log 2>&1 &
 SERVER_PID=$!
 sleep 1
-timeout 5 $CLIENT_BIN 0 > /tmp/tls-test-client3.log 2>&1; CLIENT_RC=$?
+CLIENT_RC=0
+timeout 5 $CLIENT_BIN 0 > /tmp/tls-test-client3.log 2>&1 || CLIENT_RC=$?
 
 if grep -qiE 'preverify=0.*err=20:unable to get local issuer certificate' /tmp/tls-test-client3.log 2>/dev/null; then
     pass "unknown CA detected (certificate not trusted)"
@@ -147,7 +151,8 @@ export ACE_TLS_INSECURE=1
 $SERVER_BIN 1 > /tmp/tls-test-server4.log 2>&1 &
 SERVER_PID=$!
 sleep 1
-timeout 5 $CLIENT_BIN 0 > /tmp/tls-test-client4.log 2>&1; CLIENT_RC=$?
+CLIENT_RC=0
+timeout 5 $CLIENT_BIN 0 > /tmp/tls-test-client4.log 2>&1 || CLIENT_RC=$?
 sleep 1
 
 if grep -q 'TLS verify disabled (insecure mode)' /tmp/tls-test-client4.log 2>/dev/null; then
@@ -165,6 +170,42 @@ if grep -q 'TLS verify disabled (insecure mode)' /tmp/tls-test-client4.log 2>/de
     fi
 else
     fail "insecure flag not honored"
+fi
+
+kill $SERVER_PID 2>/dev/null
+wait $SERVER_PID 2>/dev/null || true
+
+# ---- Test 5: Expired server certificate ----
+info "Test 5: Expired server certificate should reject"
+unset ACE_TLS_INSECURE
+# Expired server cert (notAfter in the past) signed by the valid CA.
+openssl genrsa -out /tmp/test-expired.key 2048 2>/dev/null
+openssl req -new -key /tmp/test-expired.key -out /tmp/test-expired.csr \
+    -subj '/CN=localhost' 2>/dev/null
+openssl x509 -req -in /tmp/test-expired.csr \
+    -CA /tmp/test-ca.pem -CAkey /tmp/test-ca.key -CAcreateserial \
+    -out /tmp/test-expired.pem -days -1 2>/dev/null
+
+export ACE_CERT_FILE=/tmp/test-expired.pem
+export ACE_KEY_FILE=/tmp/test-expired.key
+export ACE_CA_FILE=/tmp/test-ca.pem
+export ACE_HOSTNAME=localhost
+
+$SERVER_BIN 1 > /tmp/tls-test-server5.log 2>&1 &
+SERVER_PID=$!
+sleep 1
+CLIENT_RC=0
+timeout 5 $CLIENT_BIN 0 > /tmp/tls-test-client5.log 2>&1 || CLIENT_RC=$?
+sleep 1
+
+if grep -qi 'certificate has expired\|expired' /tmp/tls-test-client5.log 2>/dev/null; then
+    pass "expired certificate detected and rejected"
+elif [ $CLIENT_RC -ne 0 ] && ! grep -Eq 'LSQ_HSK_OK|LSQ_HSK_RESUMED_OK' /tmp/tls-test-client5.log 2>/dev/null; then
+    pass "expired certificate caused handshake rejection"
+else
+    echo "Client log:"
+    grep -iE 'cert|expired|verify|hsk|fail|error' /tmp/tls-test-client5.log | head -10 || true
+    fail "expired certificate not detected (handshake should have been rejected)"
 fi
 
 kill $SERVER_PID 2>/dev/null
