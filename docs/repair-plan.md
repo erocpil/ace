@@ -27,6 +27,14 @@ transport，task 作为上层业务单元，Unix socket 本地控制）基本正
 
 **迁移方式**：创建 `tls_context.[ch]`，把 SSL_CTX、证书、CA、SNI、ALPN、keylog 从 `service.c` 中拆出。
 
+**当前状态（2026-08-13）**：除 SNI 外全部完成。默认证书验证、hostname 验证（`X509_check_host`）、可配置
+CA、insecure 模式、负面集成测试（未知 CA / 过期证书 / hostname 不匹配）均已落地并有 CI 覆盖。
+
+残留缺口：client 不发送 SNI —— `service_connect()` / `service_connect_nop()` 把 `hostname=NULL` 传给
+`lsquic_engine_connect()`，server 侧 `service_lookup_cert()` 对任意 SNI 返回单张证书（多证书 SNI 标为
+future work）。单证书部署下不削弱安全性（hostname 验证直接对呈现证书校验），仅是多证书按域名选证的
+完整性缺口。修复方向：client 侧把 hostname 传给 `lsquic_engine_connect()`，server 侧多证书时按 SNI 选证。
+
 ---
 
 ### P1：固定宽度版本化协议 codec
