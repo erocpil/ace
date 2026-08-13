@@ -78,6 +78,14 @@ target_link_libraries(test_quic_session PRIVATE
 	-Wl,--start-group liblsquic.a libssl.a libcrypto.a -Wl,--end-group pthread z m)
 add_test(NAME quic_session COMMAND test_quic_session)
 
+add_executable(test_tls_identity
+	test_tls_identity.c ${PROJECT_SOURCE_DIR}/src/tls_identity.c)
+target_include_directories(test_tls_identity PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_options(test_tls_identity PRIVATE -Wall -Wextra -Werror -Wno-unused-function -UNDEBUG)
+target_link_libraries(test_tls_identity PRIVATE
+	-Wl,--start-group libssl.a libcrypto.a -Wl,--end-group pthread z m)
+add_test(NAME tls_identity COMMAND test_tls_identity)
+
 add_test(
 	NAME build_deps_version_selection
 	COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/check-build-deps.sh

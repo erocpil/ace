@@ -11,6 +11,7 @@
 #include <openssl/x509v3.h>
 
 #include "define.h"
+#include "tls_identity.h"
 
 /* ------------------------------------------------------------------ */
 /* Per-SSL_CTX storage via ex_data (two indices, thread-safe init)    */
@@ -301,16 +302,8 @@ static int tls_ctx_verify_callback(int preverify_ok,
 			? SSL_CTX_get_ex_data(ssl_ctx, tls_ctx_ex_data_idx)
 			: NULL;
 
-		if (ctx && ctx->hostname) {
-			if (X509_check_host(cert, ctx->hostname,
-					    strlen(ctx->hostname),
-					    0, NULL) != 1) {
-				elog("hostname mismatch: expected '%s'",
-				     ctx->hostname);
-				return 0;  /* reject */
-			}
-			blog("hostname '%s' verified", ctx->hostname);
-		}
+		if (ctx && !tls_identity_check_hostname(ctx->hostname, cert))
+			return 0;  /* reject */
 	}
 
 	return preverify_ok;
