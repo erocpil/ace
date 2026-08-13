@@ -3,6 +3,28 @@
 
 #include "task.h"
 
+/* Metadata sidecar for a sendfile transfer (RECV side).  Fixed binary layout,
+ * written incrementally as each segment completes, read back on resume.
+ * Local file, native byte order, naturally packed (no padding). */
+#define ACE_SF_META_MAGIC   "ACEM"
+#define ACE_SF_META_VERSION 1
+
+struct ace_sf_meta_hdr {
+	char     magic[4];      /* "ACEM" */
+	uint8_t  version;       /* 1 */
+	uint8_t  reserved;      /* 0 */
+	uint16_t n_segments;
+	uint32_t file_length;
+};                          /* 12 bytes */
+
+struct ace_sf_meta_seg {
+	uint64_t offset;        /* segment byte offset in the file */
+	uint32_t size;          /* segment byte length */
+	uint32_t checksum;      /* task_checksum32, valid when done */
+	uint8_t  done;          /* 0 = pending, 1 = complete + verified */
+	uint8_t  pad[3];
+};                          /* 20 bytes */
+
 struct sendfile_subtask {
 	/* this element must be the first */
 	struct subtask sub;

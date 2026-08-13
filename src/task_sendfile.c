@@ -1,8 +1,14 @@
 #include <assert.h>
+#include <stdio.h>
+#include <unistd.h>
 #include "task_sendfile.h"
 #include "upstream.h"
 #include "define.h"
 #include "magic.h"
+
+/* forward decl: defined after sendfile_rx (used by the rx path) */
+static int sendfile_meta_record(struct sendfile_task *sft, int seg_index,
+				uint32_t checksum);
 
 /** task_create_sendfile - create subtask
  *
@@ -135,6 +141,13 @@ ssize_t sendfile_rx(struct lsquic_stream_ctx *sc)
 	struct sendfile_subtask *sfst = (struct sendfile_subtask*)sc->subtask;
 
 	if (unlikely(sfst->length <= skb->len)) {
+		/* segment fully received: record its checksum in the metadata
+		 * sidecar (used for resume-time verification). */
+		struct sendfile_task *sft =
+			container_of(sfst->sub.task, struct sendfile_task, task);
+		uint32_t cksum = task_checksum32(sfst->data, sfst->length);
+		if (sendfile_meta_record(sft, (int)sfst->sub.no - 1, cksum) != 0)
+			return TASK_FAIL;
 		// SKB_DUMP(skb);
 		// clog("sc %p rx_bytes %lu", sc, sc->rx_bytes);
 		/* reset skb memory */
@@ -224,6 +237,160 @@ DONE:
    */
 
 
+/* ---- Phase 2: .part segments + metadata sidecar ---- */
+
+static int sendfile_part_path(char *out, size_t outsz, const char *file, int k)
+{
+	int n = snprintf(out, outsz, "%s/%s.part.%d", TASK_RECEIVE_ROOT, file, k);
+	return (n < 0 || (size_t)n >= outsz) ? -1 : 0;
+}
+
+static int sendfile_meta_path(char *out, size_t outsz, const char *file)
+{
+	int n = snprintf(out, outsz, "%s/%s.acemeta", TASK_RECEIVE_ROOT, file);
+	return (n < 0 || (size_t)n >= outsz) ? -1 : 0;
+}
+
+/* Write the metadata header + zeroed per-segment records (crash-safe: the
+ * records are pre-allocated so in-place pwrite updates never move data). */
+static int sendfile_meta_init(struct sendfile_task *sft, int n_segments,
+			      const struct ace_sendfile_chunk *chunks)
+{
+	char meta_path[PATH_MAX];
+	if (sendfile_meta_path(meta_path, sizeof(meta_path), sft->file) != 0)
+		return -1;
+
+	int fd = open(meta_path, O_CREAT | O_WRONLY | O_TRUNC,
+		      S_IRUSR | S_IWUSR);
+	if (fd < 0) {
+		eslog("open(%s)", meta_path);
+		return -1;
+	}
+
+	struct ace_sf_meta_hdr hdr;
+	memset(&hdr, 0, sizeof(hdr));
+	memcpy(hdr.magic, ACE_SF_META_MAGIC, 4);
+	hdr.version = ACE_SF_META_VERSION;
+	hdr.n_segments = (uint16_t)n_segments;
+	hdr.file_length = (uint32_t)sft->length;
+
+	if (write(fd, &hdr, sizeof(hdr)) != (ssize_t)sizeof(hdr))
+		goto fail;
+	for (int k = 0; k < n_segments; k++) {
+		struct ace_sf_meta_seg seg;
+		memset(&seg, 0, sizeof(seg));
+		seg.offset = chunks[k].offset;
+		seg.size = chunks[k].size;
+		if (write(fd, &seg, sizeof(seg)) != (ssize_t)sizeof(seg))
+			goto fail;
+	}
+	if (fsync(fd) != 0)
+		goto fail;
+	close(fd);
+	return 0;
+
+fail:
+	close(fd);
+	return -1;
+}
+
+/* Mark one segment complete + verified (checksum recorded for resume). */
+static int sendfile_meta_record(struct sendfile_task *sft, int seg_index,
+				uint32_t checksum)
+{
+	char meta_path[PATH_MAX];
+	if (sendfile_meta_path(meta_path, sizeof(meta_path), sft->file) != 0)
+		return -1;
+
+	int fd = open(meta_path, O_WRONLY);
+	if (fd < 0) {
+		eslog("open(%s)", meta_path);
+		return -1;
+	}
+
+	struct ace_sf_meta_seg seg;
+	memset(&seg, 0, sizeof(seg));
+	seg.offset = (uint64_t)sft->sfst[seg_index + 1].offset;
+	seg.size = (uint32_t)sft->sfst[seg_index + 1].length;
+	seg.checksum = checksum;
+	seg.done = 1;
+
+	off_t off = (off_t)(sizeof(struct ace_sf_meta_hdr) +
+			    (size_t)seg_index * sizeof(struct ace_sf_meta_seg));
+	ssize_t n = pwrite(fd, &seg, sizeof(seg), off);
+	if (n != (ssize_t)sizeof(seg)) {
+		close(fd);
+		return -1;
+	}
+	if (fsync(fd) != 0) {
+		close(fd);
+		return -1;
+	}
+	close(fd);
+	return 0;
+}
+
+/* Concatenate all .part files into the final file, in segment order. */
+static int sendfile_concat(struct sendfile_task *sft, int n_segments)
+{
+	char final_path[PATH_MAX];
+	if (task_receive_path(final_path, sizeof(final_path),
+			      TASK_RECEIVE_ROOT, sft->file) != 0)
+		return -1;
+
+	int out_fd = open(final_path, O_CREAT | O_WRONLY | O_TRUNC | O_NOFOLLOW,
+			  S_IRUSR | S_IWUSR);
+	if (out_fd < 0) {
+		eslog("open(%s)", final_path);
+		return -1;
+	}
+
+	char buf[65536];
+	for (int k = 0; k < n_segments; k++) {
+		char part_path[PATH_MAX];
+		if (sendfile_part_path(part_path, sizeof(part_path),
+				       sft->file, k) != 0) {
+			close(out_fd);
+			return -1;
+		}
+		int in_fd = open(part_path, O_RDONLY);
+		if (in_fd < 0) {
+			eslog("open(%s)", part_path);
+			close(out_fd);
+			return -1;
+		}
+		ssize_t r;
+		while ((r = read(in_fd, buf, sizeof(buf))) > 0) {
+			ssize_t w = write(out_fd, buf, (size_t)r);
+			if (w != r) {
+				close(in_fd);
+				close(out_fd);
+				return -1;
+			}
+		}
+		close(in_fd);
+	}
+
+	if (fsync(out_fd) != 0) {
+		close(out_fd);
+		return -1;
+	}
+	close(out_fd);
+	return 0;
+}
+
+/* Remove the .part files and metadata sidecar. */
+static void sendfile_cleanup_parts(struct sendfile_task *sft, int n_segments)
+{
+	char path[PATH_MAX];
+	for (int k = 0; k < n_segments; k++) {
+		if (sendfile_part_path(path, sizeof(path), sft->file, k) == 0)
+			unlink(path);
+	}
+	if (sendfile_meta_path(path, sizeof(path), sft->file) == 0)
+		unlink(path);
+}
+
 /* Build the explicit chunk plan: n_segments contiguous segments that tile
  * the file exactly.  Chunk k covers [quota*k, quota*k + size).  Caller owns
  * the returned array. */
@@ -259,6 +426,13 @@ int sendfile_init(struct task *task)
 
 	int fd = 0;
 
+	/* stream 0 is not carrying data */
+	unsigned short int n_sub_data = task->n_sub - 1;
+	if (!ace_task_memory_valid(n_sub_data, SENDFILE_BLOCK_SIZE)) {
+		errno = ENOMEM;
+		return -1;
+	}
+
 	if (TASK_ROLE_RECV == task->role) {
 		struct ace_sendfile_nego *nego = sft->nego;
 		char receive_file[PATH_MAX];
@@ -290,52 +464,64 @@ int sendfile_init(struct task *task)
 		}
 		clog("about to receive file \"%s\"", receive_file);
 
-		ylog("receive file %s / %s", sft->path, sft->file);
-		/* subtask 0 is for stream 0 */
-		/* other stream consume subtask from [1] */
-		sft->index = 1;
-		ylog("TODO mmap()");
-		fd = open(receive_file, O_CREAT | O_RDWR | O_TRUNC | O_NOFOLLOW,
-				S_IRUSR | S_IWUSR);
-		if (fd < 0) {
-			eslog("open(%s)", receive_file);
+		if (!sft->nego || !sft->nego->chunks ||
+		    sft->nego->n_segments != n_sub_data) {
+			errno = EPROTO;
 			return -1;
 		}
-		/* Stretch the file size to the size of the (mmapped) array of ints */
-		if (-1 == lseek(fd, sft->length - 1, SEEK_SET)) {
-			eslog("lseek(%d %lu)", fd, sft->length);
-			close(fd);
-			return -1;
-		} else {
-			/* Something needs to be written at the end of the file to
-			 * have the file actually have the new size.
-			 * Just writing an empty string at the current file position will do.
-			 */
+		const struct ace_sendfile_chunk *chunks = sft->nego->chunks;
+
+		/* subtask 0 is for stream 0; each data stream writes its own
+		 * contiguous segment to a separate .part file. */
+		sft->index = 1;
+		for (int k = 0; k < n_sub_data; k++) {
+			struct sendfile_subtask *sfst = &sft->sfst[k + 1];
+			sfst->length = chunks[k].size;
+			sfst->offset = chunks[k].offset;
+			if (chunks[k].size == 0) {
+				sfst->data = NULL;
+				continue;
+			}
+			char part_path[PATH_MAX];
+			if (sendfile_part_path(part_path, sizeof(part_path),
+					       sft->file, k) != 0) {
+				errno = ENAMETOOLONG;
+				return -1;
+			}
+			fd = open(part_path, O_CREAT | O_RDWR | O_TRUNC | O_NOFOLLOW,
+				  S_IRUSR | S_IWUSR);
+			if (fd < 0) {
+				eslog("open(%s)", part_path);
+				return -1;
+			}
+			/* Stretch the part to the segment size for the mmap. */
+			if (-1 == lseek(fd, (off_t)chunks[k].size - 1, SEEK_SET)) {
+				eslog("lseek(%d %lu)", fd,
+				      (unsigned long)chunks[k].size);
+				close(fd);
+				return -1;
+			}
 			if (1 != write(fd, "", 1)) {
 				eslog("write(%d)", fd);
 				close(fd);
 				return -1;
 			}
-			log("lseek(%ld) and write last byte", sft->length - 1);
-		}
-		struct stat st;
-		if (fstat(fd, &st) == -1 ) {
-			eslog("fstat()");
+			sfst->data = (char*)mmap(NULL, chunks[k].size,
+						 PROT_READ | PROT_WRITE,
+						 MAP_SHARED, fd, 0);
 			close(fd);
-			return -1;
-		} else {
-			log("%ld <-> %ld", st.st_size, sft->length);
+			if ((void*)-1 == sfst->data) {
+				eslog("mmap(%s)", part_path);
+				sfst->data = NULL;
+				return -1;
+			}
+			log("mmap part %s", part_path);
 		}
-		sft->data = (char*)mmap(NULL, sft->length, PROT_READ | PROT_WRITE,
-				MAP_SHARED, fd, 0);
-		close(fd);
-		if ((void*)-1 == sft->data) {
-			eslog();
-			sft->data = NULL;
+
+		/* Write the metadata sidecar header + zeroed segment records. */
+		if (sendfile_meta_init(sft, n_sub_data, chunks) != 0)
 			return -1;
-		} else {
-			log("mmap(%d %s)", fd, receive_file);
-		}
+		return 0;
 	} else {
 		/* TASK_ROLE_SEND */
 		/* init sendfile task */
@@ -405,35 +591,14 @@ int sendfile_init(struct task *task)
 		sft->path = dirname(file);
 	}
 
-	/* init sendfile subtask */
-	/* stream 0 is not carrying data */
-	unsigned short int n_sub_data = task->n_sub - 1;
-	if (!ace_task_memory_valid(n_sub_data, SENDFILE_BLOCK_SIZE)) {
-		errno = ENOMEM;
+	/* SEND: build the chunk plan and lay out the data-stream subtasks. */
+	struct ace_sendfile_chunk *chunks =
+		sendfile_build_chunks(sft->length, n_sub_data);
+	if (!chunks) {
+		munmap(sft->data, sft->length);
 		return -1;
 	}
-
-	/* Determine the chunk plan.  The sender builds it and encodes it in the
-	 * nego; the receiver validates the one it received. */
-	const struct ace_sendfile_chunk *chunks = NULL;
-	if (TASK_ROLE_SEND == task->role) {
-		struct ace_sendfile_chunk *built =
-			sendfile_build_chunks(sft->length, n_sub_data);
-		if (!built) {
-			munmap(sft->data, sft->length);
-			return -1;
-		}
-		sft->chunks = built;
-		chunks = built;
-	} else {
-		if (!sft->nego || !sft->nego->chunks ||
-		    sft->nego->n_segments != n_sub_data) {
-			munmap(sft->data, sft->length);
-			errno = EPROTO;
-			return -1;
-		}
-		chunks = sft->nego->chunks;
-	}
+	sft->chunks = chunks;
 
 	log("subtask %u", n_sub_data);
 	struct sendfile_subtask *sfst = NULL;
@@ -442,6 +607,7 @@ int sendfile_init(struct task *task)
 		sfst = &sft->sfst[i];
 		sfst->data = sft->data + chunks[i - 1].offset;
 		sfst->length = chunks[i - 1].size;
+		sfst->offset = chunks[i - 1].offset;
 		tl += sfst->length;
 		ylog("sfst[%d] %p data %p offset %lu length %ld",
 				i, sfst, sfst->data,
@@ -646,17 +812,36 @@ struct sk_buff *sendfile_exit(struct task *task)
 	TASK_DUMP(task);
 	task_exit(task);
 	struct sendfile_task *sft = container_of(task, struct sendfile_task, task);
-	if (sft->data && sft->length > 0) {
-		if (munmap(sft->data, sft->length) != 0) {
-			eslog("munmap(%p %lu)", sft->data, sft->length);
-		}
-		sft->data = NULL;
-	}
+	unsigned short n_sub_data =
+		(unsigned short)(task->n_sub > 0 ? task->n_sub - 1 : 0);
+
 	if (task->role == TASK_ROLE_RECV) {
+		/* munmap each segment's .part mapping */
+		for (int k = 0; k < n_sub_data; k++) {
+			struct sendfile_subtask *sfst = &sft->sfst[k + 1];
+			if (sfst->data && sfst->length > 0)
+				munmap(sfst->data, sfst->length);
+			sfst->data = NULL;
+		}
+		/* concatenate on success; drop parts + metadata either way */
+		if (task->n_sub_done >= task->n_sub) {
+			if (sendfile_concat(sft, n_sub_data) != 0)
+				eslog("concat failed; leaving .part files for recovery");
+			else
+				sendfile_cleanup_parts(sft, n_sub_data);
+		} else {
+			sendfile_cleanup_parts(sft, n_sub_data);
+		}
 		free(sft->path);
 		free(sft->file);
 		free(sft->type);
 	} else {
+		if (sft->data && sft->length > 0) {
+			if (munmap(sft->data, sft->length) != 0) {
+				eslog("munmap(%p %lu)", sft->data, sft->length);
+			}
+			sft->data = NULL;
+		}
 		free(sft->source_path);
 		free(sft->type);
 		free(sft->chunks);
