@@ -110,8 +110,8 @@ void *service_func(void *arg)
 		return NULL;
 	}
 
-	service_init_cert_hash(se);
-
+	/* cert_hash was already created in service_init(); do not re-create it
+	 * here or the first table leaks. */
 	if (-1 == service_init_ssl_ctx_map(se)) {
 		se->run_result = -1;
 		elog("QUIC_EVENT service_start status=failed stage=tls");
