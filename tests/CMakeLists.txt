@@ -118,6 +118,13 @@ target_link_libraries(test_task_dispatch PRIVATE
 	-Wl,--start-group liblsquic.a libssl.a libcrypto.a -Wl,--end-group libmagic.so liblzma.so pthread z m)
 add_test(NAME task_dispatch COMMAND test_task_dispatch)
 
+add_executable(test_control_command
+	test_control_command.c ${PROJECT_SOURCE_DIR}/src/control_command.c ${PROJECT_SOURCE_DIR}/src/protocol_codec.c ${PROJECT_SOURCE_DIR}/src/mem_budget.c)
+target_include_directories(test_control_command PRIVATE
+	${PROJECT_SOURCE_DIR}/src)
+target_compile_options(test_control_command PRIVATE -Wall -Wextra -Werror -Wno-unused-function -UNDEBUG)
+add_test(NAME control_command COMMAND test_control_command)
+
 add_test(
 	NAME build_deps_version_selection
 	COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/check-build-deps.sh
