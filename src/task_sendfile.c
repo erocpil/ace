@@ -732,12 +732,20 @@ int sendfile_init(struct task *task)
 		int n_done = 0;
 		for (int k = 0; k < n_sub_data; k++)
 			n_done += sft->resume_bitmap[k] != 0;
-		/* Resume only when there is at least one complete and one missing
-		 * segment.  All-zero (fresh) or all-done (already fully
-		 * transferred) fall back to a clean retransfer. */
-		sft->resuming = (n_done > 0 && n_done < n_sub_data);
-		if (!sft->resuming)
+		/* Partial resume: at least one complete and one missing segment.
+		 * All-zero (fresh) retransfers everything.  All-done (every
+		 * segment already present + verified) skips transfer entirely:
+		 * the segments are counted done up front, and the completion
+		 * frame is emitted right after the resume bitmap is flushed. */
+		if (n_done == n_sub_data && n_sub_data > 0) {
+			sft->resuming = 1;
+			task->done_after_reply = 1;
+		} else if (n_done > 0) {
+			sft->resuming = 1;
+		} else {
+			sft->resuming = 0;
 			memset(sft->resume_bitmap, 0, sizeof(sft->resume_bitmap));
+		}
 
 		/* subtask 0 is for stream 0; each data stream writes its own
 		 * contiguous segment to a separate .part file. */
@@ -1117,16 +1125,9 @@ int sendfile_done(struct lsquic_stream_ctx *sc)
 				lsquic_conn_get_ctx(lsquic_stream_conn(sc->stream));
 			struct lsquic_stream_ctx *s0sc = lsquic_stream_get_ctx(lconn_ctx->s0);
 			struct sk_buff *skb = list_first_entry(&s0sc->txq, struct sk_buff, skb_node);
-			struct ace_frame f = {
-				.payload_len = 0,
-				.theme       = (uint16_t)task->type,
-				.stream_id   = 1,
-				.flags       = ACE_FRAME_FLAG_LAST,
-				.version     = ACE_PROTO_VERSION,
-			};
-			ace_frame_encode((unsigned char *)skb->head, &f);
+			skb->len = (unsigned int)ace_done_frame_encode(
+				(unsigned char *)skb->head, (uint16_t)task->type);
 			skb->data = skb->head;
-			skb->len = ACE_FRAME_HDR_LEN;
 			skb->tail = skb->len;
 			skb->offset = 0;
 			lsquic_stream_wantwrite(lconn_ctx->s0, 1);

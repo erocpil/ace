@@ -99,6 +99,12 @@ struct task {
 	 * success, -1 on failure.  Used by tasks that answer negotiation with
 	 * something other than an echo (e.g. sendfile resume bitmap). */
 	int (*nego_ack)(struct task*, struct sk_buff *tx, struct sk_buff *rx);
+	/* RECV-only: after the stream-0 reply (nego echo / resume bitmap) has
+	 * been flushed, emit the completion ("done") frame ourselves.  Used
+	 * when nothing is left to transfer — e.g. sendfile with every segment
+	 * already present — so there is no data-stream completion to trigger
+	 * sendfile_done.  1 = emit done frame after reply, 0 = normal. */
+	int done_after_reply;
 	struct sk_buff *(*exit)(struct task*);
 	unsigned long start;
 	unsigned long end;

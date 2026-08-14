@@ -174,7 +174,22 @@ ssize_t s0_tx_func(struct lsquic_stream_ctx *sc)
 		lsquic_stream_wantwrite(sc->stream, 0);
 		return TASK_DONE;
 	} else {
-		/* phase 1: reply */
+		/* phase 1: the nego reply (echo / resume bitmap) is flushed.
+		 * A task with nothing left to transfer (e.g. sendfile whose
+		 * every segment is already present) emits the completion frame
+		 * itself now that the reply has been delivered. */
+		struct task *task = sc->subtask ?
+			((struct subtask *)sc->subtask)->task : NULL;
+		if (task && task->done_after_reply) {
+			task->done_after_reply = 0;
+			skb->len = (unsigned int)ace_done_frame_encode(
+				(unsigned char *)skb->head, (uint16_t)task->type);
+			skb->data = skb->head;
+			skb->tail = skb->len;
+			skb->offset = 0;
+			lsquic_stream_wantwrite(sc->stream, 1);
+			return TASK_GOON;
+		}
 		lsquic_stream_wantwrite(sc->stream, 0);
 		return TASK_GOON;
 	}

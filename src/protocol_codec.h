@@ -57,6 +57,24 @@ static inline void ace_frame_encode(unsigned char *buf,
 	ace_wr32(buf + 12, f->payload_len);
 }
 
+/* Encode a task-completion ("done") frame: an empty-payload frame flagged
+ * ACE_FRAME_FLAG_LAST.  Returns the encoded length (ACE_FRAME_HDR_LEN).
+ * Shared by the receiver's normal completion path (sendfile_done) and the
+ * "already fully transferred" fast path (s0_tx_func when the task sets
+ * done_after_reply). */
+static inline int ace_done_frame_encode(unsigned char *buf, uint16_t theme)
+{
+	struct ace_frame f = {
+		.payload_len = 0,
+		.theme       = theme,
+		.stream_id   = 1,
+		.flags       = ACE_FRAME_FLAG_LAST,
+		.version     = ACE_PROTO_VERSION,
+	};
+	ace_frame_encode(buf, &f);
+	return ACE_FRAME_HDR_LEN;
+}
+
 /* ------------------------------------------------------------------ */
 /* Payload encode / decode                                             */
 /* ------------------------------------------------------------------ */
