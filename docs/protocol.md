@@ -74,6 +74,15 @@ bounded by `ACE_MAX_FILE_SIZE`. `file_hash` is the sender's whole-file identity;
 persists it in the `.acemeta` sidecar and refuses to resume a transfer whose current `file_hash`
 differs (a same-name same-length but different-content source is retransmitted fresh, never mixed).
 
+`file_hash` is computed over an immutable snapshot of the source — an anonymous, sealed memfd the
+sender copies the file into at `init` time — so the negotiated hash always matches the bytes
+actually transmitted; a later external write or truncate to the source path cannot desynchronise
+them. One residual race is out of scope: if the source is modified *during* the snapshot copy, the
+snapshot can hold a torn mix of old and new bytes. That still keeps the hash consistent with what
+is sent (the receiver never mixes content across transfers), but the snapshot is not a
+point-in-time image of the file. Eliminating it would require source-side cooperation (a lock or
+version), which the protocol does not assume.
+
 ### Chunk-plan entry
 
 Each entry describes one contiguous byte range carried by one data stream:
@@ -117,9 +126,10 @@ offset  size  field
 ### Done frame (`flags = LAST`)
 
 A frame with `flags = ACE_FRAME_FLAG_LAST` signals the end of a task. Its `theme` is the task's
-theme, `stream_id` is 1, and `payload_len` is 0. The receiver of a `sf` answers the final data
-segment with a done frame; the sender treats `FLAG_LAST` on the control stream as task
-completion.
+theme, `stream_id` is 1, and `payload_len` is 0. The receiver of a `sf` emits a done frame when
+every data segment is complete — after the final data segment lands, or immediately after the
+resume bitmap when every segment was already present (the skip-all fast path). The sender treats
+`FLAG_LAST` on the control stream as task completion.
 
 ### Resume bitmap frame (`flags = CONTROL`)
 
