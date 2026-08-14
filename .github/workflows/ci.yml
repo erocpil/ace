@@ -171,3 +171,9 @@ jobs:
           ACE_IP_VERSION: ${{ matrix.ip_version }}
           ACE_UPSTREAM_FILE: /tmp/ci-client.sock
         run: bash scripts/crash-restart-test.sh
+      - name: perf graceful-completion regression
+        env:
+          ACE_BUILD_DIR: build/ci
+          ACE_IP_VERSION: ${{ matrix.ip_version }}
+          ACE_UPSTREAM_FILE: /tmp/ci-client.sock
+        run: bash scripts/perf-test.sh

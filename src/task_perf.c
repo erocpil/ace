@@ -215,7 +215,7 @@ ssize_t perf_ctrl_rx(struct lsquic_stream_ctx *sc)
 			/* set rx buffer to external area */
 			skb->head = pfst->data;
 			skb->data = pfst->data;
-			skb->tail = pfst->length;
+			skb->tail = 0;
 			skb->end = pfst->length;
 			skb->len = 0;
 			skb->offset = 0;
@@ -240,25 +240,82 @@ ssize_t perf_ctrl_tx(struct lsquic_stream_ctx *sc)
 ssize_t perf_rx(struct lsquic_stream_ctx *sc)
 {
 	struct sk_buff *skb = sc->rx;
+	struct perf_subtask *pfst = (struct perf_subtask*)sc->subtask;
 
-	skb->tail = 0;
-	skb->len = 0;
-	skb->offset = 0;
-
-	return 0;
+	if (pfst->length <= skb->len) {
+		/* block fully received */
+		skb->head = NULL;
+		skb->data = NULL;
+		skb->offset = 0;
+		skb->len = 0;
+		skb->tail = 0;
+		skb->end = 0;
+		return TASK_DONE;
+	}
+	return TASK_GOON;
 }
 
 ssize_t perf_tx(struct lsquic_stream_ctx *sc)
 {
 	struct sk_buff *skb = sc->tx;
+	struct perf_subtask *pfst = (struct perf_subtask*)sc->subtask;
 
-	skb->offset = 0;
-
-	return 0;
+	if (pfst->length <= skb->offset) {
+		/* block fully sent */
+		lsquic_stream_wantwrite(sc->stream, 0);
+		lsquic_stream_flush(sc->stream);
+		skb->head = NULL;
+		skb->data = NULL;
+		skb->offset = 0;
+		skb->len = 0;
+		skb->tail = 0;
+		skb->end = 0;
+		return TASK_DONE;
+	}
+	return TASK_GOON;
 }
 
 int perf_done(struct lsquic_stream_ctx *sc)
 {
-	(void)sc;
-	return 0;
+	struct task *task = ((struct subtask*)sc->subtask)->task;
+
+	task->n_sub_done++;
+
+	if (task->n_sub_done < (size_t)(task->n_sub - 1)) {
+		/* partially done */
+		return TASK_DONE;
+	}
+
+	if (task->n_sub_done == (size_t)(task->n_sub - 1)) {
+		/* all data streams done, except s0 */
+		if (TASK_ROLE_RECV == task->role) {
+			/* notify sender with a wire frame flagged
+			 * ACE_FRAME_FLAG_LAST */
+			struct lsquic_conn_ctx *lconn_ctx =
+				lsquic_conn_get_ctx(lsquic_stream_conn(sc->stream));
+			struct lsquic_stream_ctx *s0sc =
+				lsquic_stream_get_ctx(lconn_ctx->s0);
+			struct sk_buff *skb =
+				list_first_entry(&s0sc->txq, struct sk_buff, skb_node);
+			skb->len = (unsigned int)ace_done_frame_encode(
+				(unsigned char *)skb->head, (uint16_t)task->type);
+			skb->data = skb->head;
+			skb->tail = skb->len;
+			skb->offset = 0;
+			lsquic_stream_wantwrite(lconn_ctx->s0, 1);
+		}
+		return TASK_DONE;
+	}
+
+	if (task->n_sub_done == (size_t)(task->n_sub)) {
+		/* this is stream 0 */
+		if (lsquic_stream_id(sc->stream) != 0) {
+			return TASK_FAIL;
+		}
+		ylog("all %lu streams are done, task exiting", task->n_sub_done);
+		task->data = (void*)lstream_ctx_del_rxq_first(sc);
+		return TASK_EXIT;
+	}
+
+	return TASK_FAIL;
 }
