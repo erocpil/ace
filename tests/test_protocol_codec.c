@@ -1,6 +1,7 @@
 #include "../src/protocol_codec.h"
 #include "../src/task_protocol.h"
 #include <assert.h>
+#include <stdlib.h>
 #include <string.h>
 
 int main(void)
@@ -63,15 +64,15 @@ int main(void)
 		.path = "/tmp/x",
 		.file = "out",
 		.type = "bin",
-		.path_len = 6,
-		.file_len = 3,
-		.type_len = 3,
+		.path_len = 7,      /* strlen("/tmp/x") + 1 */
+		.file_len = 4,      /* strlen("out") + 1 */
+		.type_len = 4,      /* strlen("bin") + 1 */
 		.file_length = 42,
 		.n_segments = 1,
 		.chunks = sfn_chunks,
 	};
 	size_t sfn_total = ACE_FRAME_HDR_LEN + ACE_WIRE_SENDFILE_NEGO_LEN
-		+ 6 + 3 + 3 + ACE_WIRE_SENDFILE_CHUNK_LEN;
+		+ 7 + 4 + 4 + ACE_WIRE_SENDFILE_CHUNK_LEN;
 	assert(ace_sendfile_nego_encode(NULL, 0, 0, &sfn) == sfn_total);
 	assert(ace_sendfile_nego_encode(probe_buf, sfn_total - 1, 0, &sfn) == 0);
 	assert(ace_sendfile_nego_encode(probe_buf, sfn_total, 0, &sfn) == sfn_total);
@@ -123,6 +124,37 @@ int main(void)
 	assert(ace_sendfile_resume_decode(bitmap, 0, &dec_n, &dec_bitmap) == -1);
 	unsigned char huge[ACE_MAX_TASK_STREAMS + 1];
 	assert(ace_sendfile_resume_decode(huge, sizeof(huge), &dec_n, &dec_bitmap) == -1);
+
+	/* ---- 12. sendfile nego: n_segments > file_length rejected ---- */
+	{
+		unsigned char zlen[ACE_WIRE_SENDFILE_NEGO_LEN + 6 + 3 + 3];
+		ace_wr16(zlen, 1);          /* code */
+		ace_wr16(zlen + 2, 6);      /* path_len */
+		ace_wr16(zlen + 4, 3);      /* file_len */
+		ace_wr16(zlen + 6, 3);      /* type_len */
+		ace_wr32(zlen + 8, 3);      /* file_length = 3 */
+		ace_wr16(zlen + 12, 5);     /* n_segments = 5 > 3 */
+		ace_wr32(zlen + 14, 0);     /* file_hash */
+		memcpy(zlen + 18, "/tmp/x", 6);
+		memcpy(zlen + 24, "out", 3);
+		memcpy(zlen + 27, "bin", 3);
+		assert(ace_sendfile_nego_decode(zlen, sizeof(zlen), NULL) == -1);
+	}
+
+	/* ---- 13. sendfile nego file_hash round-trip ---- */
+	{
+		sfn.file_hash = 0xDEADBEEF;
+		unsigned char sfn_buf[256];
+		size_t sfn_n = ace_sendfile_nego_encode(sfn_buf, sizeof(sfn_buf), 0, &sfn);
+		assert(sfn_n == sfn_total);
+		struct ace_sendfile_nego sfn_dec;
+		assert(ace_sendfile_nego_decode(sfn_buf + ACE_FRAME_HDR_LEN,
+						sfn_n - ACE_FRAME_HDR_LEN, &sfn_dec) == 0);
+		assert(sfn_dec.file_hash == 0xDEADBEEF);
+		assert(sfn_dec.n_segments == 1);
+		assert(sfn_dec.chunks[0].offset == 0 && sfn_dec.chunks[0].size == 42);
+		free((void *)sfn_dec.chunks);
+	}
 
 	return 0;
 }

@@ -1,8 +1,7 @@
 #!/bin/bash
-# resume-test.sh — Phase 3 resume handshake integration test.
-# Pre-seeds a partial transfer (segment 0 complete + verified in the metadata
-# sidecar), then runs a full `sf` and asserts the receiver resumes: the final
-# file matches the source and the pre-seeded segment is NOT retransmitted.
+# resume-mismatch-test.sh — same-name same-length but different-content resume
+# rejection.  A stale .acemeta whose file_hash does not match the current source
+# must be discarded (fresh retransfer), never reused to produce a mixed file.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -13,16 +12,17 @@ info() { printf "${CYAN}[INFO]${RESET} %s\n" "$*"; }
 
 ACE_BUILD_DIR=${ACE_BUILD_DIR:-build}
 ACE_IP_VERSION=${ACE_IP_VERSION:-4}
-NSEG=${ACE_RESUME_NSEG:-4}          # data-stream count (segment count)
-CERT_DIR=$(mktemp -d /tmp/ace-resume-cert.XXXXXX)
+NSEG=${ACE_RESUME_NSEG:-4}
+CERT_DIR=$(mktemp -d /tmp/ace-rxm-cert.XXXXXX)
 ACE_UPSTREAM_FILE=${ACE_UPSTREAM_FILE:-$CERT_DIR/client.sock}
-INPUT=/tmp/ace-resume-input.bin
+INPUT=/tmp/ace-rxm-input.bin     # current source (A)
+OTHER=/tmp/ace-rxm-other.bin     # prior, different-content source (B)
 NAME=$(basename "$INPUT")
 
 cleanup() {
     [ -n "${CLIENT_PID:-}" ] && { kill "$CLIENT_PID" 2>/dev/null || true; wait "$CLIENT_PID" 2>/dev/null || true; }
     [ -n "${SERVER_PID:-}" ] && { kill "$SERVER_PID" 2>/dev/null || true; wait "$SERVER_PID" 2>/dev/null || true; }
-    rm -f /tmp/ace-resume-*.log "$INPUT" "$ACE_UPSTREAM_FILE"
+    rm -f /tmp/ace-rxm-*.log "$INPUT" "$OTHER" "$ACE_UPSTREAM_FILE"
     rm -rf "received/$NAME" "received/$NAME.part."* "received/$NAME.acemeta"
     rm -f "$CERT_DIR/cert.pem" "$CERT_DIR/key.pem"; rmdir "$CERT_DIR" 2>/dev/null || true
 }
@@ -34,16 +34,19 @@ openssl req -newkey rsa:2048 -nodes -x509 -days 1 \
 export ACE_CERT_FILE="$CERT_DIR/cert.pem" ACE_KEY_FILE="$CERT_DIR/key.pem"
 export ACE_TLS_INSECURE=1 ACE_UPSTREAM_FILE
 
-# 8 MiB source, NSEG segments of 2 MiB each.
+# Two independent 8 MiB files, same name/length but different content.
 dd if=/dev/urandom of="$INPUT" bs=1M count=8 status=none
+dd if=/dev/urandom of="$OTHER" bs=1M count=8 status=none
 
-# Pre-seed a partial transfer: segment 0 complete + verified.
+# Seed a "prior partial transfer" whose segment 0 is OTHER's first 2 MiB, and
+# whose sidecar carries OTHER's whole-file hash — so it matches name+length but
+# NOT the current source's identity.
 mkdir -p received
-dd if="$INPUT" of="received/$NAME.part.0" bs=1M count=2 status=none
+dd if="$OTHER" of="received/$NAME.part.0" bs=1M count=2 status=none
 
-python3 - "$INPUT" "$NSEG" <<'PY'
+python3 - "$INPUT" "$OTHER" "$NSEG" <<'PY'
 import struct, os, sys
-src, nseg = sys.argv[1], int(sys.argv[2])
+src, other, nseg = sys.argv[1], sys.argv[2], int(sys.argv[3])
 name = os.path.basename(src)
 total = os.path.getsize(src)
 quota = total // nseg
@@ -56,10 +59,9 @@ def fnv1a(data):
 
 part0 = open(f"received/{name}.part.0", "rb").read()
 ck0 = fnv1a(part0)
-whole = open(src, "rb").read()
-file_hash = fnv1a(whole)
+other_hash = fnv1a(open(other, "rb").read())   # OTHER's identity, not src's
 
-hdr = struct.pack("<4sBBHII", b"ACEM", 1, 0, nseg, total, file_hash)
+hdr = struct.pack("<4sBBHII", b"ACEM", 1, 0, nseg, total, other_hash)
 segs = b""
 for k in range(nseg):
     off = quota * k
@@ -70,20 +72,17 @@ for k in range(nseg):
 open(f"received/{name}.acemeta", "wb").write(hdr + segs)
 PY
 
-# The resume handshake is exercised only if the server read the seeded metadata
-# and the client saw the CONTROL bitmap frame.  The final-file cmp above already
-# proves the missing segments were filled in around the pre-seeded segment.
-info "Starting resume server..."
-stdbuf -oL -eL "./$ACE_BUILD_DIR/src/ace" 1 > /tmp/ace-resume-server.log 2>&1 &
+info "Starting resume-mismatch server..."
+stdbuf -oL -eL "./$ACE_BUILD_DIR/src/ace" 1 > /tmp/ace-rxm-server.log 2>&1 &
 SERVER_PID=$!
 sleep 1
-kill -0 "$SERVER_PID" 2>/dev/null || fail "resume server died immediately"
+kill -0 "$SERVER_PID" 2>/dev/null || fail "server died immediately"
 
-info "Starting resume client..."
-stdbuf -oL -eL "./$ACE_BUILD_DIR/src/ace" 0 > /tmp/ace-resume-client.log 2>&1 &
+info "Starting resume-mismatch client..."
+stdbuf -oL -eL "./$ACE_BUILD_DIR/src/ace" 0 > /tmp/ace-rxm-client.log 2>&1 &
 CLIENT_PID=$!
 sleep 1
-kill -0 "$CLIENT_PID" 2>/dev/null || fail "resume client died immediately"
+kill -0 "$CLIENT_PID" 2>/dev/null || fail "client died immediately"
 
 rm -f session/127.0.0.1_12345-
 info "Sending sf $NSEG $INPUT ..."
@@ -97,15 +96,12 @@ for _ in $(seq 1 80); do
 done
 
 if [ -f "received/$NAME" ] && cmp -s "$INPUT" "received/$NAME"; then
-    pass "resume completed with an identical $(stat -c %s "$INPUT")-byte file"
+    pass "mismatched source produced a byte-identical file (stale .part rejected)"
 else
-    fail "resume did not produce a matching file"
+    fail "mismatched source produced a mixed/corrupt file"
 fi
 
-# The resume handshake is only exercised if the server read the seeded metadata
-# and the client saw the CONTROL bitmap frame.  Require both signals.
-if grep -q 'resume' /tmp/ace-resume-client.log 2>/dev/null; then
-    pass "client processed the resume bitmap frame (CONTROL)"
-else
-    fail "client log shows no resume-bitmap frame"
+if grep -q 'resume bitmap received' /tmp/ace-rxm-client.log 2>/dev/null; then
+    fail "client resumed from a mismatched source (should have retransferred fresh)"
 fi
+pass "client did NOT resume (no resume bitmap) — identity mismatch forced fresh transfer"

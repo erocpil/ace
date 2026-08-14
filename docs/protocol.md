@@ -53,7 +53,7 @@ violations are rejected by `task_frame_validate`.
 
 ### Sendfile negotiation (`theme = SENDFILE`, `flags = 0`)
 
-Fixed 14-byte header, then three NUL-terminated strings, then `n_segments` chunk-plan entries:
+Fixed 18-byte header, then three NUL-terminated strings, then `n_segments` chunk-plan entries:
 
 ```
 offset  size  field
@@ -63,13 +63,16 @@ offset  size  field
 6       2     type_len    uint16
 8       4     length      uint32, total file byte length
 12      2     n_segments  uint16, number of chunk-plan entries
-14      ...   path, file, type   NUL-terminated strings, in order
+14      4     file_hash   uint32, FNV-1a over the whole file
+18      ...   path, file, type   NUL-terminated strings, in order
 ...     ...   chunks     n_segments × 12-byte entries
 ```
 
 `path`, `file`, and `type` are `dirname`, `basename`, and `magic()` MIME type of the source path.
 Each string is validated as exactly one NUL-terminated C string. `length` is the file size,
-bounded by `ACE_MAX_FILE_SIZE`.
+bounded by `ACE_MAX_FILE_SIZE`. `file_hash` is the sender's whole-file identity; the receiver
+persists it in the `.acemeta` sidecar and refuses to resume a transfer whose current `file_hash`
+differs (a same-name same-length but different-content source is retransmitted fresh, never mixed).
 
 ### Chunk-plan entry
 
@@ -83,8 +86,10 @@ offset  size  field
 
 The plan must tile the file exactly: entries are contiguous, the first `offset` is 0, each
 subsequent `offset` equals the prior `offset + size`, and the final `offset + size` equals
-`length`. The sender builds the plan (`sendfile_build_chunks`); the receiver validates it and
-drives its mmap offsets from it, requiring `n_segments == n_sub - 1`.
+`length`. `n_segments` must not exceed `length` (otherwise a segment would be zero-length, which
+the receiver cannot complete); both ends reject that. The sender builds the plan
+(`sendfile_build_chunks`); the receiver validates it and drives its mmap offsets from it,
+requiring `n_segments == n_sub - 1`.
 
 ### Performance negotiation (`theme = PERF`, `flags = 0`)
 

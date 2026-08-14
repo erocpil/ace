@@ -59,6 +59,7 @@ struct ace_wire_sendfile_nego {
 	uint8_t  type_len[2];      /* uint16 be */
 	uint8_t  length[4];        /* uint32 be — was size_t! */
 	uint8_t  n_segments[2];    /* uint16 be — number of chunk-plan entries */
+	uint8_t  file_hash[4];     /* uint32 be — FNV-1a over the whole file */
 	/* followed by path, file, type strings, then n_segments chunk entries */
 } __attribute__((packed));
 
@@ -68,7 +69,7 @@ struct ace_wire_sendfile_chunk {
 	uint8_t  size[4];          /* uint32 be — byte length of this segment */
 } __attribute__((packed));
 
-#define ACE_WIRE_SENDFILE_NEGO_LEN 14
+#define ACE_WIRE_SENDFILE_NEGO_LEN 18
 #define ACE_WIRE_SENDFILE_CHUNK_LEN 12
 
 /* perf negotiation payload */

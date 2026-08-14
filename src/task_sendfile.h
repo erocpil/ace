@@ -18,7 +18,8 @@ struct ace_sf_meta_hdr {
 	uint8_t  reserved;      /* 0 */
 	uint16_t n_segments;
 	uint32_t file_length;
-} __attribute__((packed));  /* 12 bytes */
+	uint32_t file_hash;     /* FNV-1a over the whole file (identity) */
+} __attribute__((packed));  /* 16 bytes */
 
 struct ace_sf_meta_seg {
 	uint64_t offset;        /* segment byte offset in the file */
@@ -49,6 +50,11 @@ struct sendfile_task {
 	struct ace_sendfile_nego *nego;
 	/* explicit chunk plan (offset/size per data stream); sender-owned */
 	struct ace_sendfile_chunk *chunks;
+	/* FNV-1a over the whole source file; SEND computes it in init, carries
+	 * it in the nego, and RECV persists it in the sidecar so a same-name
+	 * same-length but different-content file is never mistaken for a
+	 * resumable transfer. */
+	uint32_t file_hash;
 	/* Phase 3 resume state:
 	 *   resuming       - 1 when this transfer resumes from a prior partial
 	 *                    run (some segments already complete+verified)

@@ -1,4 +1,6 @@
+#define _GNU_SOURCE
 #include <assert.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <unistd.h>
 #include "task_sendfile.h"
@@ -335,6 +337,7 @@ static int sendfile_meta_init(struct sendfile_task *sft, int n_segments,
 	hdr.version = ACE_SF_META_VERSION;
 	hdr.n_segments = (uint16_t)n_segments;
 	hdr.file_length = (uint32_t)sft->length;
+	hdr.file_hash = sft->nego->file_hash;
 
 	if (write(fd, &hdr, sizeof(hdr)) != (ssize_t)sizeof(hdr))
 		goto fail;
@@ -419,11 +422,14 @@ static int sendfile_meta_load(struct sendfile_task *sft, int n_segments)
 		return -1;
 	}
 
-	/* The header must describe exactly this transfer. */
+	/* The header must describe exactly this transfer, including the source
+	 * file identity: a same-name same-length but different-content file has
+	 * a different file_hash, so its stale .part files are rejected. */
 	if (memcmp(hdr.magic, ACE_SF_META_MAGIC, 4) != 0 ||
 	    hdr.version != ACE_SF_META_VERSION ||
 	    hdr.n_segments != (uint16_t)n_segments ||
-	    hdr.file_length != (uint32_t)sft->length) {
+	    hdr.file_length != (uint32_t)sft->length ||
+	    hdr.file_hash != sft->nego->file_hash) {
 		close(fd);
 		return 0;   /* stale / mismatched: start over */
 	}
@@ -477,7 +483,9 @@ static int sendfile_meta_load(struct sendfile_task *sft, int n_segments)
 	return 1;
 }
 
-/* Concatenate all .part files into the final file, in segment order. */
+/* Concatenate all .part files into the final file, in segment order.
+ * Writes to a sibling temp file and atomically renames it into place, so a
+ * crash mid-concat never exposes a truncated/partial final file. */
 static int sendfile_concat(struct sendfile_task *sft, int n_segments)
 {
 	char final_path[PATH_MAX];
@@ -485,10 +493,15 @@ static int sendfile_concat(struct sendfile_task *sft, int n_segments)
 			      TASK_RECEIVE_ROOT, sft->file) != 0)
 		return -1;
 
-	int out_fd = open(final_path, O_CREAT | O_WRONLY | O_TRUNC | O_NOFOLLOW,
+	char tmp_path[PATH_MAX];
+	if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", final_path) >=
+	    (int)sizeof(tmp_path))
+		return -1;
+
+	int out_fd = open(tmp_path, O_CREAT | O_WRONLY | O_TRUNC | O_NOFOLLOW,
 			  S_IRUSR | S_IWUSR);
 	if (out_fd < 0) {
-		eslog("open(%s)", final_path);
+		eslog("open(%s)", tmp_path);
 		return -1;
 	}
 
@@ -496,34 +509,50 @@ static int sendfile_concat(struct sendfile_task *sft, int n_segments)
 	for (int k = 0; k < n_segments; k++) {
 		char part_path[PATH_MAX];
 		if (sendfile_part_path(part_path, sizeof(part_path),
-				       sft->file, k) != 0) {
-			close(out_fd);
-			return -1;
-		}
+				       sft->file, k) != 0)
+			goto fail;
 		int in_fd = open(part_path, O_RDONLY);
 		if (in_fd < 0) {
 			eslog("open(%s)", part_path);
-			close(out_fd);
-			return -1;
+			goto fail;
 		}
 		ssize_t r;
 		while ((r = read(in_fd, buf, sizeof(buf))) > 0) {
 			ssize_t w = write(out_fd, buf, (size_t)r);
 			if (w != r) {
 				close(in_fd);
-				close(out_fd);
-				return -1;
+				goto fail;
 			}
 		}
 		close(in_fd);
 	}
 
-	if (fsync(out_fd) != 0) {
-		close(out_fd);
+	if (fsync(out_fd) != 0)
+		goto fail;
+	if (close(out_fd) != 0) {
+		unlink(tmp_path);
 		return -1;
 	}
-	close(out_fd);
+
+	if (rename(tmp_path, final_path) != 0) {
+		eslog("rename(%s -> %s)", tmp_path, final_path);
+		unlink(tmp_path);
+		return -1;
+	}
+
+	/* Make the rename durable. */
+	int dir_fd = open(TASK_RECEIVE_ROOT, O_RDONLY | O_DIRECTORY);
+	if (dir_fd >= 0) {
+		fsync(dir_fd);
+		close(dir_fd);
+	}
+
 	return 0;
+
+fail:
+	close(out_fd);
+	unlink(tmp_path);
+	return -1;
 }
 
 /* Remove the .part files and metadata sidecar. */
@@ -733,6 +762,18 @@ int sendfile_init(struct task *task)
 			rlog("file %s is empty", file);
 		}
 
+		/* Reject a segment count above the byte length: it would yield
+		 * zero-length segments, which the receiver cannot complete
+		 * (its EOF path never bumps n_sub_done). */
+		if ((size_t)n_sub_data > sft->length) {
+			elog("segment count %u exceeds file length %lu",
+			     n_sub_data, (unsigned long)sft->length);
+			close(fd);
+			free(sft->source_path);
+			sft->source_path = NULL;
+			return -1;
+		}
+
 		/* mmap() the whole file */
 		sft->data = (char*)mmap(NULL, sft->length, PROT_READ, MAP_SHARED, fd, 0);
 		close(fd);
@@ -743,6 +784,9 @@ int sendfile_init(struct task *task)
 		} else {
 			log("mmap(%d %s)", fd, file);
 		}
+		/* Whole-file identity hash for resume: lets the receiver reject a
+		 * same-name same-length but different-content source. */
+		sft->file_hash = task_checksum32(sft->data, sft->length);
 		unsigned int n = sft->length / 4;
 		clog("file %s %ld %d\n"
 				"mmap %p - %p", file, sft->length, n,
@@ -893,6 +937,7 @@ int sendfile_nego(struct task *task, struct sk_buff* skb)
 		.type_len    = (uint16_t)(strlen(sft->type) + 1),
 		.file_length = (uint32_t)sft->length,
 		.n_segments  = (uint16_t)(task->n_sub - 1),
+		.file_hash   = sft->file_hash,
 		.chunks      = sft->chunks,
 	};
 

@@ -79,6 +79,7 @@ struct ace_sendfile_nego {
 	uint16_t       type_len;
 	uint32_t       file_length;  /* was size_t */
 	uint16_t       n_segments;   /* number of chunk-plan entries */
+	uint32_t       file_hash;    /* FNV-1a over the whole file (identity) */
 	const struct ace_sendfile_chunk *chunks; /* owned native array (decode
 						     allocates; encode reads) */
 };

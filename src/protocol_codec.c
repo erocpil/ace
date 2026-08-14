@@ -15,7 +15,7 @@ int ace_sendfile_nego_decode(const unsigned char *buf, size_t buflen,
 	size_t strings_len, chunks_len;
 	const unsigned char *strings;
 	uint16_t code, path_len, file_len, type_len, n_segments;
-	uint32_t file_length;
+	uint32_t file_length, file_hash;
 
 	if (!buf || buflen < ACE_WIRE_SENDFILE_NEGO_LEN)
 		return -1;
@@ -26,6 +26,7 @@ int ace_sendfile_nego_decode(const unsigned char *buf, size_t buflen,
 	type_len    = ace_rd16(buf + 6);
 	file_length = ace_rd32(buf + 8);
 	n_segments  = ace_rd16(buf + 12);
+	file_hash   = ace_rd32(buf + 14);
 
 	/* Validate ranges */
 	if (path_len == 0 || path_len > 4096 ||
@@ -33,7 +34,8 @@ int ace_sendfile_nego_decode(const unsigned char *buf, size_t buflen,
 	    type_len == 0 || type_len > 1024 ||
 	    file_length == 0 ||
 	    file_length > ACE_MAX_FILE_SIZE ||
-	    n_segments == 0 || n_segments > ACE_MAX_TASK_STREAMS)
+	    n_segments == 0 || n_segments > ACE_MAX_TASK_STREAMS ||
+	    n_segments > file_length)
 		return -1;
 
 	strings_len = (size_t)path_len + file_len + type_len;
@@ -84,6 +86,7 @@ int ace_sendfile_nego_decode(const unsigned char *buf, size_t buflen,
 		out->type_len    = type_len;
 		out->file_length = file_length;
 		out->n_segments  = n_segments;
+		out->file_hash   = file_hash;
 		out->path = (const char *)strings;
 		out->file = (const char *)(strings + path_len);
 		out->type = (const char *)(strings + path_len + file_len);
@@ -177,6 +180,7 @@ size_t ace_sendfile_nego_encode(unsigned char *buf, size_t bufsz,
 	ace_wr16(p + 6,  nego->type_len);
 	ace_wr32(p + 8,  nego->file_length);
 	ace_wr16(p + 12, nego->n_segments);
+	ace_wr32(p + 14, nego->file_hash);
 	p += ACE_WIRE_SENDFILE_NEGO_LEN;
 
 	memcpy(p, nego->path, nego->path_len);
