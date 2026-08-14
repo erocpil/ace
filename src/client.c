@@ -631,8 +631,13 @@ void client_on_conn_closed(lsquic_conn_t *conn)
 		lconn_ctx->conn.close_reported = 1;
 		if (!task_complete && service_is_running(se)) {
 			ace_conn_fail(&lconn_ctx->conn, ACE_CLOSE_RESET);
-			se->n_conn_failed++;
 			elog("QUIC_EVENT connection status=lost task_complete=0");
+			/* Only a task that was in-flight and failed to complete is a
+			 * service failure.  The auto-connect warmup probe connection
+			 * has no task, so its eventual loss (peer idle timeout /
+			 * reset) must not flip the service outcome to failure. */
+			if (task)
+				se->n_conn_failed++;
 		} else {
 			ace_conn_close(&lconn_ctx->conn,
 				       task_complete
