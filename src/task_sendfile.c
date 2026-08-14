@@ -608,7 +608,7 @@ static struct ace_sendfile_chunk *sendfile_build_chunks(size_t length,
  * mid-copy) it fails rather than hash half a file. */
 static int sendfile_snapshot(int src_fd, off_t length, int *snap_fd_out)
 {
-	int snap_fd = memfd_create("ace-sendfile", MFD_CLOEXEC);
+	int snap_fd = memfd_create("ace-sendfile", MFD_CLOEXEC | MFD_ALLOW_SEALING);
 	if (snap_fd < 0) {
 		eslog("memfd_create()");
 		return -1;
@@ -644,10 +644,12 @@ static int sendfile_snapshot(int src_fd, off_t length, int *snap_fd_out)
 	}
 
 	/* Harden the snapshot: F_SEAL_WRITE | F_SEAL_SEAL makes the memfd
-	 * permanently read-only.  Best-effort — some kernels/containers
-	 * disallow sealing (EPERM).  Even unsealed the snapshot is immutable:
-	 * the memfd is anonymous (no path, so nothing external can open it)
-	 * and the only fd is closed right after mmap, leaving a read-only
+	 * permanently read-only.  This works because memfd_create was called
+	 * with MFD_ALLOW_SEALING — without it the kernel (>= 5.1) pre-applies
+	 * F_SEAL_SEAL, so F_ADD_SEALS here would ALWAYS fail with EPERM.  The
+	 * seal is still best-effort: if a sandbox forbids F_ADD_SEALS outright,
+	 * the snapshot stays immutable anyway — the memfd is anonymous (no
+	 * path) and the only fd is closed right after mmap, leaving a read-only
 	 * mapping as the sole reference. */
 	if (fcntl(snap_fd, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_SEAL) != 0)
 		blog("F_ADD_SEALS unavailable (%s); snapshot is anonymous but unsealed",
