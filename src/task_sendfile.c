@@ -104,89 +104,97 @@ ssize_t sendfile_ctrl_rx(struct lsquic_stream_ctx *sc)
 	struct sk_buff *skb = sc->rx;
 	struct upstream_skb_head head;
 
-	/* decode the wire control frame (nego echo / done) */
-	int frame_status = task_frame_validate(skb->head, skb->len, &head);
-	if (frame_status == 0) {
-		return 0;   /* need more bytes */
-	}
-	if (frame_status < 0) {
-		return TASK_FAIL;   /* malformed */
-	}
-
-	uint16_t flags = task_frame_peek_flags(skb->head);
-	if (flags & ACE_FRAME_FLAG_LAST) {
-		ylog("TASK_DONE");
-		return TASK_DONE;
-	}
-
-	ylog("length %u sendfile %u stream %u flags %u",
-			head.length, head.theme, head.serial, flags);
-
-	/* start each stream except stream 0 the control */
-	struct lsquic_conn *lconn = lsquic_stream_conn(sc->stream);
-	struct lsquic_conn_ctx *lconn_ctx = lsquic_conn_get_ctx(lconn);
-	if (!lconn_ctx || sc->stream != lconn_ctx->s0 || !lconn_ctx->task) {
-		return TASK_FAIL;
-	}
-	struct task *task = (struct task*)lconn_ctx->task;
-	struct sendfile_task *sft =
-		container_of(task, struct sendfile_task, task);
-	struct lsquic_stream_ctx *pos = NULL;
-
-	if (flags & ACE_FRAME_FLAG_CONTROL) {
-		/* Resume bitmap frame — SEND side only.  Decode the per-segment
-		 * done flags, then arm only the missing segments. */
-		if (task->role != TASK_ROLE_SEND)
-			return TASK_FAIL;
-		const unsigned char *bitmap = NULL;
-		uint16_t n_seg = 0;
-		if (ace_sendfile_resume_decode(skb->head + ACE_FRAME_HDR_LEN,
-					       head.length, &n_seg, &bitmap) != 0)
-			return TASK_FAIL;
-		if (n_seg != task->n_sub - 1)
-			return TASK_FAIL;
-		memcpy(sft->resume_bitmap, bitmap, n_seg);
-		sft->resuming = 1;
-		ylog("resume bitmap received: %u segments", n_seg);
-		if (sendfile_arm_streams(sft, lconn_ctx) != 0)
-			return TASK_FAIL;
-		/* SEND resets the control-stream rx buffer. */
-		sc->rx->len = 0;
-		sc->rx->tail = 0;
-		sc->rx->data = sc->rx->head;
-	} else if (TASK_ROLE_SEND == task->role) {
-		if (sendfile_arm_streams(sft, lconn_ctx) != 0)
-			return TASK_FAIL;
-		/* TASK_ROLE_SEND should reset skb */
-		sc->rx->len = 0;
-		sc->rx->tail = 0;
-		sc->rx->data = sc->rx->head;
-	} else {
-		list_for_each_entry(pos, &lconn_ctx->pending_stream_head, stream_node) {
-			struct sendfile_subtask *sfst = (struct sendfile_subtask*)pos->subtask;
-			if (sft->resuming &&
-			    sft->resume_bitmap[(int)sfst->sub.no - 1]) {
-				/* Already complete: leave the default rx buffer so
-				 * the stream's EOF is handled normally. */
-				continue;
-			}
-			struct sk_buff *skb = pos->rx;
-			clog("stream %p subtask %p write on %p length %d",
-					pos->stream, sfst, skb->data, skb->len);
-			/* set rx buffer to mmap()ed area */
-			skb->head = sfst->data;
-			skb->data = skb->head;
-			skb->len = 0;
-			skb->tail = 0;
-			skb->end = sfst->length;
-			skb->offset = 0;
-			SKB_DUMP(skb);
-			clog("stream %p sc %p subtask %p", pos->stream, pos, sfst);
+	for (;;) {
+		/* decode the next wire control frame (nego echo / resume
+		 * bitmap / done).  A single stream read may carry several
+		 * frames (e.g. the skip-all fast path sends the resume
+		 * bitmap and the done frame back-to-back), so loop until the
+		 * buffer no longer holds a complete frame. */
+		int frame_status = task_frame_validate(skb->head, skb->len, &head);
+		if (frame_status == 0) {
+			return 0;   /* need more bytes */
 		}
-		/* no reset because TASK_ROLE_RECV use this skb to echo back */
-	}
+		if (frame_status < 0) {
+			return TASK_FAIL;   /* malformed */
+		}
 
-	return 0;
+		size_t frame_len = ACE_FRAME_HDR_LEN + (size_t)head.length;
+		uint16_t flags = task_frame_peek_flags(skb->head);
+		if (flags & ACE_FRAME_FLAG_LAST) {
+			ylog("TASK_DONE");
+			return TASK_DONE;
+		}
+
+		ylog("length %u sendfile %u stream %u flags %u",
+				head.length, head.theme, head.serial, flags);
+
+		/* start each stream except stream 0 the control */
+		struct lsquic_conn *lconn = lsquic_stream_conn(sc->stream);
+		struct lsquic_conn_ctx *lconn_ctx = lsquic_conn_get_ctx(lconn);
+		if (!lconn_ctx || sc->stream != lconn_ctx->s0 || !lconn_ctx->task) {
+			return TASK_FAIL;
+		}
+		struct task *task = (struct task*)lconn_ctx->task;
+		struct sendfile_task *sft =
+			container_of(task, struct sendfile_task, task);
+		struct lsquic_stream_ctx *pos = NULL;
+
+		if (flags & ACE_FRAME_FLAG_CONTROL) {
+			/* Resume bitmap frame — SEND side only.  Decode the
+			 * per-segment done flags, then arm only the missing
+			 * segments. */
+			if (task->role != TASK_ROLE_SEND)
+				return TASK_FAIL;
+			const unsigned char *bitmap = NULL;
+			uint16_t n_seg = 0;
+			if (ace_sendfile_resume_decode(skb->head + ACE_FRAME_HDR_LEN,
+						       head.length, &n_seg, &bitmap) != 0)
+				return TASK_FAIL;
+			if (n_seg != task->n_sub - 1)
+				return TASK_FAIL;
+			memcpy(sft->resume_bitmap, bitmap, n_seg);
+			sft->resuming = 1;
+			ylog("resume bitmap received: %u segments", n_seg);
+			if (sendfile_arm_streams(sft, lconn_ctx) != 0)
+				return TASK_FAIL;
+		} else if (TASK_ROLE_SEND == task->role) {
+			if (sendfile_arm_streams(sft, lconn_ctx) != 0)
+				return TASK_FAIL;
+		} else {
+			list_for_each_entry(pos, &lconn_ctx->pending_stream_head, stream_node) {
+				struct sendfile_subtask *sfst = (struct sendfile_subtask*)pos->subtask;
+				if (sft->resuming &&
+				    sft->resume_bitmap[(int)sfst->sub.no - 1]) {
+					/* Already complete: leave the default rx buffer so
+					 * the stream's EOF is handled normally. */
+					continue;
+				}
+				struct sk_buff *skb = pos->rx;
+				clog("stream %p subtask %p write on %p length %d",
+						pos->stream, sfst, skb->data, skb->len);
+				/* set rx buffer to mmap()ed area */
+				skb->head = sfst->data;
+				skb->data = skb->head;
+				skb->len = 0;
+				skb->tail = 0;
+				skb->end = sfst->length;
+				skb->offset = 0;
+				SKB_DUMP(skb);
+				clog("stream %p sc %p subtask %p", pos->stream, pos, sfst);
+			}
+			/* no reset because TASK_ROLE_RECV use this skb to echo back */
+			return 0;
+		}
+
+		/* Consume the frame just processed, keeping any trailing bytes
+		 * so a coalesced follow-up frame is not dropped. */
+		if (frame_len < skb->len)
+			memmove(skb->head, skb->head + frame_len, skb->len - frame_len);
+		skb->len -= (unsigned int)frame_len;
+		skb->tail = skb->len;
+		skb->data = skb->head;
+		skb->offset = 0;
+	}
 }
 
 ssize_t sendfile_ctrl_tx(struct lsquic_stream_ctx *sc)

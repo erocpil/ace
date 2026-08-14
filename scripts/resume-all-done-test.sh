@@ -110,3 +110,13 @@ if [ "$skipped" -eq "$NSEG" ]; then
 else
     fail "client skipped $skipped segments, expected $NSEG (a full retransfer happened)"
 fi
+
+# The sender must also RECEIVE the completion (done) frame and finish its
+# task, not just the receiver.  Regression for the coalesced bitmap+done
+# read: the old code zeroed the whole rx buffer after the bitmap and dropped
+# a done frame delivered in the same read, leaving the sender hanging.
+if grep -q 'task exiting' /tmp/ace-all-done-client.log 2>/dev/null; then
+    pass "client received the done frame and completed its task"
+else
+    fail "client never completed (done frame dropped after resume bitmap)"
+fi
