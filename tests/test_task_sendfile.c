@@ -159,5 +159,38 @@ int main(void)
 		free(cmd);
 		unlink(src);
 	}
+
+	/* Empty files are rejected explicitly: there is nothing to transfer and
+	 * the receiver's zero-length-segment path cannot complete. */
+	{
+		char src[] = "/tmp/ace-sf-empty-XXXXXX";
+		int sfd = mkstemp(src);
+		assert(sfd >= 0);
+		close(sfd);   /* zero bytes */
+
+		struct upstream_skb_head head = {
+			.theme = TASK_THEME_SENDFILE,
+			.serial = 1,
+		};
+		size_t buflen = sizeof(head) + strlen(src) + 1;
+		char *cmd = malloc(buflen);
+		assert(cmd != NULL);
+		memcpy(cmd, &head, sizeof(head));
+		memcpy(cmd + sizeof(head), src, strlen(src) + 1);
+
+		t = task_create_sendfile(2);
+		assert(t != NULL);
+		t->role = TASK_ROLE_SEND;
+		t->n_sub = 2;
+		t->data = cmd;
+
+		assert(sendfile_init(t) == -1);   /* empty file rejected */
+
+		/* init failed after freeing its own source_path; exit still cleans
+		 * the task (NULL type/chunks are safe to free). */
+		assert(sendfile_exit(t) == NULL);
+		free(cmd);
+		unlink(src);
+	}
 	return 0;
 }

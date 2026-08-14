@@ -864,7 +864,14 @@ int sendfile_init(struct task *task)
 		}
 		sft->length = st.st_size;
 		if (!sft->length) {
-			rlog("file %s is empty", file);
+			/* An empty file has nothing to transfer and the receiver's
+			 * zero-length-segment path cannot complete; reject it explicitly
+			 * rather than the misleading "segment count exceeds length". */
+			elog("file %s is empty; refusing to transfer zero bytes", file);
+			close(fd);
+			free(sft->source_path);
+			sft->source_path = NULL;
+			return -1;
 		}
 
 		/* Reject a segment count above the byte length: it would yield
