@@ -524,6 +524,13 @@ static int sendfile_concat(struct sendfile_task *sft, int n_segments)
 				goto fail;
 			}
 		}
+		if (r < 0) {
+			/* A read error (not EOF) would otherwise publish a truncated
+			 * final file via the atomic rename. */
+			eslog("read(%s)", part_path);
+			close(in_fd);
+			goto fail;
+		}
 		close(in_fd);
 	}
 
@@ -774,8 +781,12 @@ int sendfile_init(struct task *task)
 			return -1;
 		}
 
-		/* mmap() the whole file */
-		sft->data = (char*)mmap(NULL, sft->length, PROT_READ, MAP_SHARED, fd, 0);
+		/* mmap() the whole file.  MAP_PRIVATE gives a stable snapshot: on
+		 * Linux the mapping is copy-on-write, so a later external write to
+		 * the source file does not change the bytes we send.  That keeps
+		 * the negotiated file_hash consistent with the transmitted content
+		 * (no TOCTOU between the identity hash and the data). */
+		sft->data = (char*)mmap(NULL, sft->length, PROT_READ, MAP_PRIVATE, fd, 0);
 		close(fd);
 		if ((void*)-1 == sft->data) {
 			eslog("mmap(%s)", file);
