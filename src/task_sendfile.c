@@ -606,7 +606,8 @@ static struct ace_sendfile_chunk *sendfile_build_chunks(size_t length,
  * separate, anonymous inode: external writes to the source path can never
  * touch it.  On any inconsistency (read/write error, or the file shrank
  * mid-copy) it fails rather than hash half a file. */
-static int sendfile_snapshot(int src_fd, off_t length, int *snap_fd_out)
+static int sendfile_snapshot(int src_fd, off_t length, int *snap_fd_out,
+			     unsigned int *seals_out)
 {
 	int snap_fd = memfd_create("ace-sendfile", MFD_CLOEXEC | MFD_ALLOW_SEALING);
 	if (snap_fd < 0) {
@@ -654,6 +655,13 @@ static int sendfile_snapshot(int src_fd, off_t length, int *snap_fd_out)
 	if (fcntl(snap_fd, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_SEAL) != 0)
 		blog("F_ADD_SEALS unavailable (%s); snapshot is anonymous but unsealed",
 		     strerror(errno));
+
+	/* Read the seals back so the caller (and the test) can assert the seal
+	 * actually took effect, rather than trusting the fcntl return value. */
+	if (seals_out) {
+		int seals = fcntl(snap_fd, F_GET_SEALS);
+		*seals_out = (seals >= 0) ? (unsigned int)seals : 0u;
+	}
 
 	*snap_fd_out = snap_fd;
 	return 0;
@@ -848,7 +856,8 @@ int sendfile_init(struct task *task)
 		 * match it exactly — an external write to the source after mmap()
 		 * would break that invariant (and a truncate could SIGBUS). */
 		int snap_fd;
-		if (sendfile_snapshot(fd, (off_t)sft->length, &snap_fd) != 0) {
+		if (sendfile_snapshot(fd, (off_t)sft->length, &snap_fd,
+				      &sft->snapshot_seals) != 0) {
 			close(fd);
 			free(sft->source_path);
 			sft->source_path = NULL;

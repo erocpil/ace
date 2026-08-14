@@ -138,6 +138,10 @@ int main(void)
 		assert(sft->data != NULL);
 		assert(memcmp(sft->data, content, clen) == 0);
 		assert(sft->file_hash == task_checksum32(content, clen));
+		/* The snapshot memfd must be genuinely sealed read-only (read
+		 * back via F_GET_SEALS, not just fcntl's return value). */
+		assert(sft->snapshot_seals ==
+		       (unsigned int)(F_SEAL_WRITE | F_SEAL_SEAL));
 
 		/* External modification of the source after init must not leak
 		 * into the snapshot. */

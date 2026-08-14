@@ -55,6 +55,11 @@ struct sendfile_task {
 	 * same-length but different-content file is never mistaken for a
 	 * resumable transfer. */
 	uint32_t file_hash;
+	/* Seals actually applied to the snapshot memfd, read back via
+	 * F_GET_SEALS right after F_ADD_SEALS.  SEND role only; 0 on RECV or
+	 * when the seal was declined.  Lets the test assert the seal truly
+	 * took effect (not merely that fcntl returned 0). */
+	unsigned int snapshot_seals;
 	/* Phase 3 resume state:
 	 *   resuming       - 1 when this transfer resumes from a prior partial
 	 *                    run (some segments already complete+verified)
