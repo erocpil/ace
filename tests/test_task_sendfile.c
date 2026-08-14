@@ -192,5 +192,39 @@ int main(void)
 		free(cmd);
 		unlink(src);
 	}
+
+	/* Files larger than ACE_MAX_FILE_SIZE are rejected with EFBIG.  A sparse
+	 * file via ftruncate reports the huge size without touching the disk. */
+	{
+		char src[] = "/tmp/ace-sf-big-XXXXXX";
+		int sfd = mkstemp(src);
+		assert(sfd >= 0);
+		assert(ftruncate(sfd, (off_t)ACE_MAX_FILE_SIZE + 1) == 0);
+		close(sfd);
+
+		struct upstream_skb_head head = {
+			.theme = TASK_THEME_SENDFILE,
+			.serial = 1,
+		};
+		size_t buflen = sizeof(head) + strlen(src) + 1;
+		char *cmd = malloc(buflen);
+		assert(cmd != NULL);
+		memcpy(cmd, &head, sizeof(head));
+		memcpy(cmd + sizeof(head), src, strlen(src) + 1);
+
+		t = task_create_sendfile(2);
+		assert(t != NULL);
+		t->role = TASK_ROLE_SEND;
+		t->n_sub = 2;
+		t->data = cmd;
+
+		errno = 0;
+		assert(sendfile_init(t) == -1);   /* oversized file rejected */
+		assert(errno == EFBIG);
+
+		assert(sendfile_exit(t) == NULL);
+		free(cmd);
+		unlink(src);
+	}
 	return 0;
 }

@@ -837,11 +837,8 @@ int sendfile_init(struct task *task)
 			return -1;
 		}
 
-		/* TODO File too large */
-		/* EFBIG 27 */
-		/* File name too long */
+		/* TODO File name too long */
 		/* ENAMETOOLONG	36 */
-		clog("TODO File too large");
 
 		char *file = (char*)malloc(len + 1);
 		if (!file) {
@@ -863,6 +860,16 @@ int sendfile_init(struct task *task)
 			;
 		}
 		sft->length = st.st_size;
+		if (sft->length > ACE_MAX_FILE_SIZE) {
+			errno = EFBIG;
+			elog("file %s size %lu exceeds ACE_MAX_FILE_SIZE %lu",
+			     file, (unsigned long)sft->length,
+			     (unsigned long)ACE_MAX_FILE_SIZE);
+			close(fd);
+			free(sft->source_path);
+			sft->source_path = NULL;
+			return -1;
+		}
 		if (!sft->length) {
 			/* An empty file has nothing to transfer and the receiver's
 			 * zero-length-segment path cannot complete; reject it explicitly
