@@ -6,6 +6,22 @@
 #include <unistd.h>
 #include "task_sendfile.h"
 
+/* Probe whether this kernel/sandbox permits memfd sealing.  sendfile_snapshot()
+ * hardens its anonymous snapshot memfd with F_ADD_SEALS(F_SEAL_WRITE|F_SEAL_SEAL)
+ * but treats that as best-effort: in a restricted sandbox that denies
+ * F_ADD_SEALS, the snapshot is still immutable (anonymous inode + read-only
+ * mmap + close(fd)), so the seal bitmask reads 0.  This mirrors the exact
+ * syscalls sendfile_snapshot() makes. */
+static int memfd_sealing_supported(void)
+{
+	int fd = memfd_create("ace-seal-probe", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+	if (fd < 0)
+		return 0;
+	int ok = fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_SEAL) == 0;
+	close(fd);
+	return ok;
+}
+
 int main(void)
 {
 	struct task *t = task_create_sendfile(3);
@@ -139,9 +155,16 @@ int main(void)
 		assert(memcmp(sft->data, content, clen) == 0);
 		assert(sft->file_hash == task_checksum32(content, clen));
 		/* The snapshot memfd must be genuinely sealed read-only (read
-		 * back via F_GET_SEALS, not just fcntl's return value). */
-		assert(sft->snapshot_seals ==
-		       (unsigned int)(F_SEAL_WRITE | F_SEAL_SEAL));
+		 * back via F_GET_SEALS, not just fcntl's return value) — but
+		 * only where sealing is permitted.  Where the sandbox denies
+		 * F_ADD_SEALS, the snapshot degrades to the anonymous memfd +
+		 * read-only mmap + close(fd) path (still immutable) and the
+		 * seal bitmask reads 0. */
+		if (memfd_sealing_supported())
+			assert(sft->snapshot_seals ==
+			       (unsigned int)(F_SEAL_WRITE | F_SEAL_SEAL));
+		else
+			assert(sft->snapshot_seals == 0u);
 
 		/* External modification of the source after init must not leak
 		 * into the snapshot. */
