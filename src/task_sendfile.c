@@ -598,6 +598,65 @@ static struct ace_sendfile_chunk *sendfile_build_chunks(size_t length,
 	return chunks;
 }
 
+/* Snapshot the source file into an immutable, sealed memfd.  A direct mmap()
+ * of the source is unsafe: MAP_PRIVATE only makes writes *through the mapping*
+ * copy-on-write — an external write to the source after mmap() is still
+ * visible, and a truncate can raise SIGBUS on access, so the identity hash
+ * and the transmitted bytes could silently diverge.  The snapshot is a
+ * separate, anonymous inode: external writes to the source path can never
+ * touch it.  On any inconsistency (read/write error, or the file shrank
+ * mid-copy) it fails rather than hash half a file. */
+static int sendfile_snapshot(int src_fd, off_t length, int *snap_fd_out)
+{
+	int snap_fd = memfd_create("ace-sendfile", MFD_CLOEXEC);
+	if (snap_fd < 0) {
+		eslog("memfd_create()");
+		return -1;
+	}
+
+	char buf[65536];
+	off_t remaining = length;
+	while (remaining > 0) {
+		size_t want = (remaining < (off_t)sizeof(buf))
+			? (size_t)remaining : sizeof(buf);
+		ssize_t r = read(src_fd, buf, want);
+		if (r <= 0) {
+			/* r == 0: the source shrank between fstat and copy;
+			 * r < 0: read error.  Either way the snapshot would be
+			 * inconsistent with the negotiated length. */
+			eslog("read(%d) snapshot", src_fd);
+			close(snap_fd);
+			return -1;
+		}
+		char *p = buf;
+		ssize_t left = r;
+		while (left > 0) {
+			ssize_t w = write(snap_fd, p, (size_t)left);
+			if (w < 0) {
+				eslog("write(memfd) snapshot");
+				close(snap_fd);
+				return -1;
+			}
+			p += w;
+			left -= w;
+		}
+		remaining -= r;
+	}
+
+	/* Harden the snapshot: F_SEAL_WRITE | F_SEAL_SEAL makes the memfd
+	 * permanently read-only.  Best-effort — some kernels/containers
+	 * disallow sealing (EPERM).  Even unsealed the snapshot is immutable:
+	 * the memfd is anonymous (no path, so nothing external can open it)
+	 * and the only fd is closed right after mmap, leaving a read-only
+	 * mapping as the sole reference. */
+	if (fcntl(snap_fd, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_SEAL) != 0)
+		blog("F_ADD_SEALS unavailable (%s); snapshot is anonymous but unsealed",
+		     strerror(errno));
+
+	*snap_fd_out = snap_fd;
+	return 0;
+}
+
 int sendfile_init(struct task *task)
 {
 	struct sendfile_task *sft = container_of(task, struct sendfile_task, task);
@@ -781,22 +840,33 @@ int sendfile_init(struct task *task)
 			return -1;
 		}
 
-		/* mmap() the whole file.  MAP_PRIVATE gives a stable snapshot: on
-		 * Linux the mapping is copy-on-write, so a later external write to
-		 * the source file does not change the bytes we send.  That keeps
-		 * the negotiated file_hash consistent with the transmitted content
-		 * (no TOCTOU between the identity hash and the data). */
-		sft->data = (char*)mmap(NULL, sft->length, PROT_READ, MAP_PRIVATE, fd, 0);
-		close(fd);
-		if ((void*)-1 == sft->data) {
-			eslog("mmap(%s)", file);
-			sft->data = NULL;
+		/* Snapshot the source into an immutable, sealed memfd first, then
+		 * mmap that snapshot.  Mapping the source directly is unsafe: the
+		 * identity hash is computed once, but the transmitted bytes must
+		 * match it exactly — an external write to the source after mmap()
+		 * would break that invariant (and a truncate could SIGBUS). */
+		int snap_fd;
+		if (sendfile_snapshot(fd, (off_t)sft->length, &snap_fd) != 0) {
+			close(fd);
+			free(sft->source_path);
+			sft->source_path = NULL;
 			return -1;
-		} else {
-			log("mmap(%d %s)", fd, file);
 		}
-		/* Whole-file identity hash for resume: lets the receiver reject a
-		 * same-name same-length but different-content source. */
+		close(fd);
+
+		sft->data = (char*)mmap(NULL, sft->length, PROT_READ, MAP_PRIVATE,
+					snap_fd, 0);
+		close(snap_fd);
+		if ((void*)-1 == sft->data) {
+			eslog("mmap(snapshot %s)", file);
+			sft->data = NULL;
+			free(sft->source_path);
+			sft->source_path = NULL;
+			return -1;
+		}
+		/* Whole-file identity hash over the sealed snapshot: byte-identical
+		 * to what is transmitted, so the receiver can reject a same-name
+		 * same-length but different-content source with confidence. */
 		sft->file_hash = task_checksum32(sft->data, sft->length);
 		unsigned int n = sft->length / 4;
 		clog("file %s %ld %d\n"

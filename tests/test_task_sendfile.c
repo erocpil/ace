@@ -2,6 +2,8 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include "task_sendfile.h"
 
 int main(void)
@@ -98,5 +100,60 @@ int main(void)
 	assert(sft->nego == NULL);
 	skb_free(small);
 	assert(sendfile_exit(t) == NULL);
+
+	/* TOCTOU regression: the SEND path snapshots the source into an
+	 * immutable, sealed memfd at init time.  A later external write (or
+	 * truncate) to the source path must NOT change the bytes the sender
+	 * transmits, so the negotiated file_hash stays consistent with the
+	 * content (no mixing of old identity + new bytes). */
+	{
+		char src[] = "/tmp/ace-sf-snap-XXXXXX";
+		int sfd = mkstemp(src);
+		assert(sfd >= 0);
+		const char content[] = "0123456789abcdef";
+		size_t clen = sizeof(content) - 1;   /* 16 bytes, no NUL */
+		assert(write(sfd, content, clen) == (ssize_t)clen);
+		close(sfd);
+
+		/* native head + path payload, exactly as the upstream queue builds */
+		struct upstream_skb_head head = {
+			.theme = TASK_THEME_SENDFILE,
+			.serial = 1,            /* n_sub = serial + 1 = 2 */
+		};
+		size_t buflen = sizeof(head) + strlen(src) + 1;
+		char *cmd = malloc(buflen);
+		assert(cmd != NULL);
+		memcpy(cmd, &head, sizeof(head));
+		memcpy(cmd + sizeof(head), src, strlen(src) + 1);
+
+		t = task_create_sendfile(2);
+		assert(t != NULL);
+		t->role = TASK_ROLE_SEND;
+		t->n_sub = 2;
+		t->data = cmd;
+
+		assert(sendfile_init(t) == 0);
+		sft = container_of(t, struct sendfile_task, task);
+		assert(sft->length == clen);
+		assert(sft->data != NULL);
+		assert(memcmp(sft->data, content, clen) == 0);
+		assert(sft->file_hash == task_checksum32(content, clen));
+
+		/* External modification of the source after init must not leak
+		 * into the snapshot. */
+		int wfd = open(src, O_WRONLY | O_TRUNC);
+		assert(wfd >= 0);
+		const char evil[] = "XXXXXXXXXXXXXXXX";
+		assert(write(wfd, evil, sizeof(evil) - 1) ==
+		       (ssize_t)(sizeof(evil) - 1));
+		close(wfd);
+
+		assert(memcmp(sft->data, content, clen) == 0);
+		assert(sft->file_hash == task_checksum32(content, clen));
+
+		assert(sendfile_exit(t) == NULL);
+		free(cmd);
+		unlink(src);
+	}
 	return 0;
 }
