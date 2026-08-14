@@ -49,14 +49,19 @@ for _attempt in $(seq 1 100); do
 done
 grep -q 'QUIC_EVENT connection status=lost' "$CLIENT_LOG"
 
-kill -TERM "$CLIENT_PID"
+# The client exits on its own once the last connection is lost (idle-exit);
+# wait for it and assert a non-zero (failure) exit status.
 set +e
+for _attempt in $(seq 1 100); do
+	kill -0 "$CLIENT_PID" 2>/dev/null || break
+	sleep 0.1
+done
 wait "$CLIENT_PID"
 CLIENT_STATUS=$?
 set -e
+CLIENT_PID=
 if [ "$CLIENT_STATUS" -eq 0 ]; then
 	echo "client returned success after injected peer loss" >&2
 	exit 1
 fi
-CLIENT_PID=
 printf '[PASS] peer loss was observable and produced failure exit status\n'

@@ -177,3 +177,9 @@ jobs:
           ACE_IP_VERSION: ${{ matrix.ip_version }}
           ACE_UPSTREAM_FILE: /tmp/ci-client.sock
         run: bash scripts/perf-test.sh
+      - name: Client self-exit regression
+        env:
+          ACE_BUILD_DIR: build/ci
+          ACE_IP_VERSION: ${{ matrix.ip_version }}
+          ACE_UPSTREAM_FILE: /tmp/ci-client.sock
+        run: bash scripts/client-exit-test.sh

@@ -6,6 +6,20 @@
 
 static int client_process_upstream_read(struct upstream_echo *echo);
 
+/* A service event loop has finished (idle-exit or startup failure).  Runs on
+ * the main loop; break it once every service has exited so the client process
+ * can shut down without an external signal. */
+static void client_stop_w_cb(EV_P_ ev_async *w, int revents)
+{
+	struct client *ct = (struct client*)w->data;
+	size_t n = __atomic_load_n(&ct->n_finished_service, __ATOMIC_ACQUIRE);
+
+	if (n >= ct->n_service) {
+		ylog("all %lu service(s) finished, breaking main loop", ct->n_service);
+		ev_break(EV_A_ EVBREAK_ALL);
+	}
+}
+
 struct client *client_init()
 {
 	struct client *ct = (struct client*)malloc(sizeof(struct client));
@@ -20,6 +34,12 @@ struct client *client_init()
 	ace_runner_init_signal(ct->loop,
 			&ct->signal_quit, &ct->signal_int, &ct->signal_term,
 			(void*)ct);
+
+	/* Service threads signal this watcher (thread-safely) when their own
+	 * event loop exits; the main loop breaks once all of them are done. */
+	ev_async_init(&ct->stop_w, client_stop_w_cb);
+	ct->stop_w.data = (void*)ct;
+	ev_async_start(ct->loop, &ct->stop_w);
 
 	return ct;
 }
@@ -221,6 +241,49 @@ static void client_drain_cb(EV_P_ ev_async *w, int revents)
 			client_process_upstream_read(echo);
 		}
 	}
+}
+
+/* True if any upstream echo still has queued work (a request waiting to be
+ * dispatched, or a response waiting to be written back). */
+static int client_has_pending_work(struct client_event_loop *evl)
+{
+	struct upstream_echo *echo = NULL;
+
+	if (!evl || !evl->up) {
+		return 0;
+	}
+	list_for_each_entry(echo, &evl->up->echo_head, echo_node) {
+		if (echo->n_rq > 0 || echo->n_sq > 0) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/* Break the event loop once the last connection is gone and nothing is
+ * queued.  Runs deferred (async) so the task-exit response, which
+ * client_on_conn_closed() queued on the upstream send queue, has a chance to
+ * flush before we tear the loop down; a direct ev_break() from inside the
+ * conn-closed callback would skip the pending write watcher. */
+static void client_idle_exit_cb(EV_P_ ev_async *w, int revents)
+{
+	struct service *se = (struct service*)w->data;
+	struct client_event_loop *evl = se ? (struct client_event_loop*)se->loop : NULL;
+
+	if (!evl || !evl->loop || !se) {
+		return;
+	}
+	/* Still a live connection: nothing to do. */
+	if (se->n_client_conn > 0) {
+		return;
+	}
+	/* A request or response is still in flight; re-check next iteration. */
+	if (client_has_pending_work(evl)) {
+		ev_async_send(evl->loop, &evl->idle_w);
+		return;
+	}
+	ylog("no active connection and no queued work, breaking event loop");
+	ev_break(EV_A_ EVBREAK_ALL);
 }
 
 void client_stop_event(struct service *se)
@@ -450,6 +513,9 @@ int client_run_event(struct service *se)
 	ev_async_init(&evl->drain_w, client_drain_cb);
 	evl->drain_w.data = (void*)evl;
 
+	ev_async_init(&evl->idle_w, client_idle_exit_cb);
+	evl->idle_w.data = (void*)se;
+
 	struct config *cc = &se->config;
 	evl->up = upstream_init(evl->loop, 4, cc->retry, cc->retry_timeout, cc->file,
 			client_process_upstream_read, NULL, 0);
@@ -467,6 +533,7 @@ int client_run_event(struct service *se)
 
 	ev_async_start(evl->loop, &evl->async_w);
 	ev_async_start(evl->loop, &evl->drain_w);
+	ev_async_start(evl->loop, &evl->idle_w);
 	if (service_is_stopped(se)) {
 		result = 0;
 		goto cleanup_async;
@@ -484,12 +551,20 @@ int client_run_event(struct service *se)
 cleanup_async:
 	ev_async_stop(evl->loop, &evl->async_w);
 	ev_async_stop(evl->loop, &evl->drain_w);
+	ev_async_stop(evl->loop, &evl->idle_w);
 cleanup_upstream:
 	upstream_free(evl->up);
 	evl->up = NULL;
 cleanup_loop:
 	ev_loop_destroy(evl->loop);
 	evl->loop = NULL;
+	/* Tell the main loop this service's event loop has exited (thread-safe:
+	 * ev_async_send is the libev cross-thread wakeup).  The main loop breaks
+	 * once every service has finished. */
+	if (evl->ct && evl->ct->loop) {
+		__atomic_fetch_add(&evl->ct->n_finished_service, 1, __ATOMIC_RELEASE);
+		ev_async_send(evl->ct->loop, &evl->ct->stop_w);
+	}
 	return result;
 }
 
@@ -608,6 +683,12 @@ void client_on_conn_closed(lsquic_conn_t *conn)
 		skb_free(skb);
 	}
 #endif
+
+	/* Last connection gone: schedule an idle-exit check.  Deferred so the
+	 * task-exit response queued above can flush first (see client_idle_exit_cb). */
+	if (evl->loop && se->n_client_conn == 0) {
+		ev_async_send(evl->loop, &evl->idle_w);
+	}
 
 	/* stream 0 may never have been established: free its pending ctx */
 	if (lconn_ctx->pending) {

@@ -17,6 +17,9 @@ struct client {
 	struct list_head service_head;
 	size_t n_service;
 	size_t n_running_service;
+	/* number of service event loops that have finished (used by the main
+	 * loop to know when every service has exited on its own) */
+	size_t n_finished_service;
 
 	volatile int quit;
 
@@ -26,6 +29,9 @@ struct client {
 	ev_signal signal_quit;
 	ev_signal signal_int;
 	ev_signal signal_term;
+
+	/* service threads signal this watcher when their loop finishes */
+	ev_async stop_w;
 
 	struct ev_loop *loop;
 	ev_timer tw;;
@@ -37,6 +43,7 @@ struct client_event_loop {
 	ev_timer timer;
 	ev_async async_w;
 	ev_async drain_w;
+	ev_async idle_w;
 	struct upstream *up;
 	struct client *ct;
 } __attribute__((aligned(sizeof(long))));
