@@ -837,9 +837,6 @@ int sendfile_init(struct task *task)
 			return -1;
 		}
 
-		/* TODO File name too long */
-		/* ENAMETOOLONG	36 */
-
 		char *file = (char*)malloc(len + 1);
 		if (!file) {
 			return -1;
@@ -941,6 +938,18 @@ int sendfile_init(struct task *task)
 		}
 		sft->file = basename(file);
 		sft->path = dirname(file);
+
+		/* The receiver refuses basenames longer than NAME_MAX (via
+		 * task_filename_validate); reject here too so the sender fails
+		 * fast instead of negotiating a transfer the receiver will
+		 * refuse.  PATH_MAX violations are caught by open() ENAMETOOLONG
+		 * above. */
+		if (strlen(sft->file) > NAME_MAX) {
+			errno = ENAMETOOLONG;
+			elog("file basename \"%s\" exceeds NAME_MAX %d",
+			     sft->file, NAME_MAX);
+			return -1;
+		}
 	}
 
 	/* SEND: build the chunk plan and lay out the data-stream subtasks. */

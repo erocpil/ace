@@ -226,5 +226,42 @@ int main(void)
 		free(cmd);
 		unlink(src);
 	}
+
+	/* A basename near (but under) NAME_MAX must NOT be rejected — the
+	 * NAME_MAX check is a fail-fast mirror of the receiver's validation and
+	 * must not trip on legal long names. */
+	{
+		char src[300];
+		strcpy(src, "/tmp/");
+		memset(src + 5, 'a', 200);
+		strcpy(src + 5 + 200, ".bin");   /* 204-byte basename < NAME_MAX */
+		int sfd = open(src, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+		assert(sfd >= 0);
+		const char content[] = "0123456789";
+		size_t clen = sizeof(content) - 1;
+		assert(write(sfd, content, clen) == (ssize_t)clen);
+		close(sfd);
+
+		struct upstream_skb_head head = {
+			.theme = TASK_THEME_SENDFILE,
+			.serial = 1,
+		};
+		size_t buflen = sizeof(head) + strlen(src) + 1;
+		char *cmd = malloc(buflen);
+		assert(cmd != NULL);
+		memcpy(cmd, &head, sizeof(head));
+		memcpy(cmd + sizeof(head), src, strlen(src) + 1);
+
+		t = task_create_sendfile(2);
+		assert(t != NULL);
+		t->role = TASK_ROLE_SEND;
+		t->n_sub = 2;
+		t->data = cmd;
+
+		assert(sendfile_init(t) == 0);   /* legal long name accepted */
+		assert(sendfile_exit(t) == NULL);
+		free(cmd);
+		unlink(src);
+	}
 	return 0;
 }
