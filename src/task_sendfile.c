@@ -363,6 +363,27 @@ fail:
 static int sendfile_meta_record(struct sendfile_task *sft, int seg_index,
 				uint32_t checksum)
 {
+	/* Flush the segment's .part bytes to disk BEFORE marking it done, so a
+	 * crash can never leave a done flag pointing at torn data.  The .part
+	 * is written via MAP_SHARED; fsync on the file flushes those dirty
+	 * pages too.  Ordering (part fsync → pwrite done → acemeta fsync) is
+	 * the crash-safety invariant — do NOT reorder. */
+	char part_path[PATH_MAX];
+	if (sendfile_part_path(part_path, sizeof(part_path),
+			       sft->file, seg_index) != 0)
+		return -1;
+	int pfd = open(part_path, O_RDONLY | O_NOFOLLOW);
+	if (pfd < 0) {
+		eslog("open(%s)", part_path);
+		return -1;
+	}
+	if (fsync(pfd) != 0) {
+		eslog("fsync(%s)", part_path);
+		close(pfd);
+		return -1;
+	}
+	close(pfd);
+
 	char meta_path[PATH_MAX];
 	if (sendfile_meta_path(meta_path, sizeof(meta_path), sft->file) != 0)
 		return -1;
