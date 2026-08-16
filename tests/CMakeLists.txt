@@ -125,6 +125,13 @@ target_include_directories(test_control_command PRIVATE
 target_compile_options(test_control_command PRIVATE -Wall -Wextra -Werror -Wno-unused-function -UNDEBUG)
 add_test(NAME control_command COMMAND test_control_command)
 
+add_executable(test_config_file
+	test_config_file.c ${PROJECT_SOURCE_DIR}/src/config_file.c)
+target_include_directories(test_config_file PRIVATE
+	${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/include/lsquic ${CMAKE_BINARY_DIR}/generated)
+target_compile_options(test_config_file PRIVATE -Wall -Wextra -Werror -Wno-unused-function -UNDEBUG)
+add_test(NAME config_file COMMAND test_config_file)
+
 add_test(
 	NAME build_deps_version_selection
 	COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/check-build-deps.sh

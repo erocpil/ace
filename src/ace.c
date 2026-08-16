@@ -1,6 +1,7 @@
 #include <sys/time.h>
 #include <sys/resource.h>
 #include "ace.h"
+#include "config_file.h"
 
 void rlimit()
 {
@@ -80,6 +81,11 @@ int main(int argc, const char *argv[])
 					co->action |= ACTION_ONE_MORE << 16;
 					co->auto_stream0 = 1;
 
+					if (config_file_load_env(cm) != 0) {
+						elog("failed to load config file, aborting");
+						return EXIT_FAILURE;
+					}
+
 					size_t n = client_launch_service(ct, cm);
 					if (ct->n_service) {
 						log("%lu connote in %ld client launched", n, ct->n_service);
@@ -117,6 +123,11 @@ int main(int argc, const char *argv[])
 						co->ipver = 6;
 					}
 					co->action |= ACTION_ONE_MORE << 16;
+
+					if (config_file_load_env(cm) != 0) {
+						elog("failed to load config file, aborting");
+						return EXIT_FAILURE;
+					}
 
 					size_t n = server_launch_service(sr, cm);
 					if (sr->n_service) {
