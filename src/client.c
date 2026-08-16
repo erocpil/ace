@@ -104,7 +104,7 @@ int client_run(struct client *ct)
 	/* Best-effort: carrier monitoring is optional; a NULL monitor (e.g. no
 	 * netlink permission in a container) must not prevent startup. */
 	struct link_monitor *lm = link_monitor_init(ct->loop,
-						    client_link_carrier_cb, NULL);
+						    client_link_carrier_cb, (void*)ct);
 
 	list_for_each_entry(pos, &ct->service_head, service_node) {
 		ace_runner_run_service(&ct->n_running_service, pos);
@@ -225,12 +225,59 @@ static inline void client_timer_expired(EV_P_ ev_timer *timer, int revents)
 	client_process_service(EV_A_ timer->data);
 }
 
-/* link_monitor carrier callback: log the transition.  Connection teardown /
- * path switching on carrier loss is a later phase — this is the seam. */
+/* link_monitor carrier callback (runs on the MAIN loop).  On carrier loss,
+ * notify each service whose co_config is bound to the affected interface so
+ * its loop can abort those connections immediately instead of waiting for the
+ * QUIC no-progress/idle timeout. */
 static void client_link_carrier_cb(const char *ifname, int up, void *user)
 {
-	(void)user;
+	struct client *ct = (struct client *)user;
+	struct service *se = NULL;
+
 	log("link carrier %s on %s", up ? "UP" : "DOWN", ifname);
+	if (up || !ct)
+		return;
+
+	list_for_each_entry(se, &ct->service_head, service_node) {
+		struct client_event_loop *evl = (struct client_event_loop *)se->loop;
+		struct co_config *co;
+
+		if (!evl || !evl->loop || list_empty(&se->config.co_config_head))
+			continue;
+		co = list_first_entry(&se->config.co_config_head,
+				      struct co_config, co_config_node);
+		if (!co->if_name[0] || strcmp(co->if_name, ifname) != 0)
+			continue;
+
+		strncpy(evl->carrier_ifname, ifname,
+			sizeof(evl->carrier_ifname) - 1);
+		evl->carrier_ifname[sizeof(evl->carrier_ifname) - 1] = '\0';
+		ev_async_send(evl->loop, &evl->carrier_w);
+	}
+}
+
+/* Runs on the SERVICE loop: abort every connection bound to the interface
+ * that just lost carrier (lsquic_conn_abort is deferred, so it does not
+ * re-enter client_on_conn_closed mid-iteration). */
+static void client_carrier_cb(EV_P_ ev_async *w, int revents)
+{
+	struct service *se = (struct service *)w->data;
+	struct client_event_loop *evl = (struct client_event_loop *)se->loop;
+	struct lsquic_conn_ctx *lc = NULL;
+	struct lsquic_conn_ctx *tmp = NULL;
+
+	log("carrier lost on %s, aborting bound connections",
+	    evl->carrier_ifname);
+
+	list_for_each_entry_safe(lc, tmp, &se->conn_head, conn_node) {
+		if (!lc->ce || !lc->ce->cc)
+			continue;
+		if (strcmp(lc->ce->cc->if_name, evl->carrier_ifname) != 0)
+			continue;
+		log("aborting connection %p bound to %s", lc->lconn,
+		    evl->carrier_ifname);
+		lsquic_conn_abort(lc->lconn);
+	}
 }
 
 static void client_async_w_cb(EV_P_ ev_async *w, int revents)
@@ -532,6 +579,9 @@ int client_run_event(struct service *se)
 	ev_async_init(&evl->idle_w, client_idle_exit_cb);
 	evl->idle_w.data = (void*)se;
 
+	ev_async_init(&evl->carrier_w, client_carrier_cb);
+	evl->carrier_w.data = (void*)se;
+
 	struct config *cc = &se->config;
 	evl->up = upstream_init(evl->loop, 4, cc->retry, cc->retry_timeout, cc->file,
 			client_process_upstream_read, NULL, 0);
@@ -550,6 +600,7 @@ int client_run_event(struct service *se)
 	ev_async_start(evl->loop, &evl->async_w);
 	ev_async_start(evl->loop, &evl->drain_w);
 	ev_async_start(evl->loop, &evl->idle_w);
+	ev_async_start(evl->loop, &evl->carrier_w);
 	if (service_is_stopped(se)) {
 		result = 0;
 		goto cleanup_async;
@@ -568,6 +619,7 @@ cleanup_async:
 	ev_async_stop(evl->loop, &evl->async_w);
 	ev_async_stop(evl->loop, &evl->drain_w);
 	ev_async_stop(evl->loop, &evl->idle_w);
+	ev_async_stop(evl->loop, &evl->carrier_w);
 cleanup_upstream:
 	upstream_free(evl->up);
 	evl->up = NULL;

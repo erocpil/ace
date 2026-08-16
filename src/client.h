@@ -44,6 +44,12 @@ struct client_event_loop {
 	ev_async async_w;
 	ev_async drain_w;
 	ev_async idle_w;
+	/* Carrier-lost notification from the main loop's link_monitor.  The main
+	 * loop copies the affected interface name into carrier_ifname and kicks
+	 * carrier_w (thread-safe); the service loop then aborts the connections
+	 * bound to that interface. */
+	ev_async carrier_w;
+	char carrier_ifname[IFNAMSIZ];
 	struct upstream *up;
 	struct client *ct;
 } __attribute__((aligned(sizeof(long))));
