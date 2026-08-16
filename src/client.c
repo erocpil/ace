@@ -101,14 +101,18 @@ static void client_timeout_cb(EV_P_ ev_timer *w, int revents)
 int client_run(struct client *ct)
 {
 	struct service *pos = NULL;
-	/* Best-effort: carrier monitoring is optional; a NULL monitor (e.g. no
-	 * netlink permission in a container) must not prevent startup. */
-	struct link_monitor *lm = link_monitor_init(ct->loop,
-						    client_link_carrier_cb, (void*)ct);
+	struct link_monitor *lm = NULL;
 
 	list_for_each_entry(pos, &ct->service_head, service_node) {
 		ace_runner_run_service(&ct->n_running_service, pos);
 	}
+
+	/* Start carrier monitoring AFTER the service threads are up so the
+	 * netlink socket setup / startup dump cannot delay the upstream control
+	 * socket (which the test scripts' socat connects to).  Best-effort: a
+	 * NULL monitor (e.g. no netlink permission in a container) must not
+	 * prevent startup. */
+	lm = link_monitor_init(ct->loop, client_link_carrier_cb, (void*)ct);
 
 	int result = ace_runner_run(ct->loop, &ct->tw,
 			ct->n_service, (void*)ct,
