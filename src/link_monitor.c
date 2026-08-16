@@ -78,6 +78,75 @@ static struct link_state *link_monitor_remember(struct link_monitor *lm,
 	return st;
 }
 
+/* Snapshot the current link states at startup so a later transition on an
+ * interface that was ALREADY up (e.g. lo before the client starts) is seen as
+ * a flip, not a first sighting.  Runs before the fd is set non-blocking, so
+ * the dump reads synchronously. */
+static void link_monitor_dump(struct link_monitor *lm)
+{
+	struct {
+		struct nlmsghdr nlh;
+		struct ifinfomsg ifm;
+	} req;
+	struct sockaddr_nl sa;
+	struct iovec req_iov = { &req, sizeof(req) };
+	struct msghdr req_msg;
+	unsigned char buf[LINK_MONITOR_BUF_LEN];
+
+	memset(&req, 0, sizeof(req));
+	req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifinfomsg));
+	req.nlh.nlmsg_type = RTM_GETLINK;
+	req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+	req.nlh.nlmsg_seq = 1;
+	req.ifm.ifi_family = AF_UNSPEC;
+
+	memset(&sa, 0, sizeof(sa));
+	sa.nl_family = AF_NETLINK;
+	req_msg = (struct msghdr){ &sa, sizeof(sa), &req_iov, 1, NULL, 0, 0 };
+
+	if (sendmsg(lm->fd, &req_msg, 0) < 0) {
+		eslog("link_monitor dump sendmsg(%d)", lm->fd);
+		return;
+	}
+
+	for (;;) {
+		struct iovec rcv_iov = { buf, sizeof(buf) };
+		struct msghdr rcv_msg = { &sa, sizeof(sa), &rcv_iov, 1, NULL, 0, 0 };
+		ssize_t n = recvmsg(lm->fd, &rcv_msg, 0);
+
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			eslog("link_monitor dump recvmsg(%d)", lm->fd);
+			return;
+		}
+		if (n == 0)
+			break;
+
+		for (struct nlmsghdr *nh = (struct nlmsghdr *)buf;
+		     NLMSG_OK(nh, (unsigned)n);
+		     nh = NLMSG_NEXT(nh, n)) {
+			if (nh->nlmsg_type == NLMSG_DONE)
+				return;
+			if (nh->nlmsg_type == RTM_NEWLINK) {
+				struct ace_link_event ev;
+				struct link_state *st;
+
+				if (link_monitor_parse(nh, (int)n, &ev) != 0)
+					continue;
+				st = link_monitor_remember(lm, ev.ifindex);
+				if (!st || st->seen)
+					continue;
+				st->seen = 1;
+				st->carrier = ace_link_carrier_up(&ev);
+				log("link monitor: %s ifindex=%d carrier=%s",
+				    ev.ifname[0] ? ev.ifname : "?",
+				    ev.ifindex, st->carrier ? "up" : "down");
+			}
+		}
+	}
+}
+
 static void link_monitor_read_cb(struct ev_loop *loop, struct ev_io *w, int revents)
 {
 	struct link_monitor *lm = (struct link_monitor *)w->data;
@@ -177,14 +246,18 @@ struct link_monitor *link_monitor_init(struct ev_loop *loop,
 		/* ignore */
 	}
 
-	fl = fcntl(fd, F_GETFL);
-	if (fl >= 0)
-		fcntl(fd, F_SETFL, fl | O_NONBLOCK);
-
 	lm->fd = fd;
 	lm->loop = loop;
 	lm->cb = cb;
 	lm->user = user;
+
+	/* Snapshot current link states BEFORE going non-blocking so the dump
+	 * can read synchronously. */
+	link_monitor_dump(lm);
+
+	fl = fcntl(fd, F_GETFL);
+	if (fl >= 0)
+		fcntl(fd, F_SETFL, fl | O_NONBLOCK);
 
 	ev_io_init(&lm->w, link_monitor_read_cb, fd, EV_READ);
 	lm->w.data = lm;
