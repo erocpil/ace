@@ -7,8 +7,11 @@
  * Command table.  The theme codes MUST match task_type[] in task.h:
  *   sf/sendfile  -> TASK_THEME_SENDFILE
  *   perf/performance -> TASK_THEME_PERF
- *   probe        -> TASK_THEME_PROBE
  * Keep the two tables in sync when adding task types.
+ *
+ * NOTE: probe is NOT a task type — it is a control-stream message handled by
+ * the auto-connect warmup path (client_on_new_stream / s0_rx_func), so it has
+ * no command word here and is rejected as unknown.
  */
 static const struct {
 	const char *word;
@@ -19,7 +22,6 @@ static const struct {
 	{ "sendfile",    8,  TASK_THEME_SENDFILE },
 	{ "perf",        4,  TASK_THEME_PERF },
 	{ "performance", 11, TASK_THEME_PERF },
-	{ "probe",       5,  TASK_THEME_PROBE },
 };
 
 static int control_match_command(const unsigned char *s, size_t len)

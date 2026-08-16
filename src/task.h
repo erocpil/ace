@@ -32,7 +32,6 @@ struct task_type {
 static struct task_type task_type[] = {
 	{ "sf", "sendfile", 0, },
 	{ "perf", "performance", 1, },
-	{ "probe", "probe", 2, },
 	{ "", "", -1, },
 };
 

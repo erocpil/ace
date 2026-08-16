@@ -76,6 +76,10 @@ static void test_parse_invalid(void)
 	expect_parse("bogus 3 /tmp/x\n", CONTROL_PARSE_INVALID,
 		     strlen("bogus 3 /tmp/x\n"), 0, 0, "");
 
+	/* probe is a control-stream message, NOT a task command */
+	expect_parse("probe 1\n", CONTROL_PARSE_INVALID,
+		     strlen("probe 1\n"), 0, 0, "");
+
 	/* non-numeric serial */
 	expect_parse("sf abc /tmp/x\n", CONTROL_PARSE_INVALID,
 		     strlen("sf abc /tmp/x\n"), 0, 0, "");
