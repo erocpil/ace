@@ -16,8 +16,12 @@ The current implementation provides:
   crash-safe resume from partially received segments;
 - IPv4 and IPv6 socket, packet-info, ECN, and address handling;
 - partial-I/O, retry, backpressure, and UDP zerocopy fallback handling;
-- signal-driven shutdown with joined service threads;
+- signal-driven shutdown with joined service threads, and client self-exit once the
+  last connection closes and no work is queued;
 - process-wide, thread-safe lsquic initialization;
+- an optional `key=value` startup configuration file (`ACE_CONFIG_FILE`);
+- a netlink link-state monitor that aborts connections bound to an interface that
+  loses carrier;
 - unit, sanitizer, fuzz, and real localhost QUIC regression tests.
 
 ACE is still a research-oriented project. See the
@@ -37,8 +41,9 @@ socket accepts local control requests such as multi-stream file transfers.
 The implemented surface is the vertical QUIC data path: client/server, TLS
 handshake, session resumption, multi-stream file transfer with crash-safe resume,
 a task framework (sendfile, perf), a layered memory budget, a local AF_UNIX
-control plane, and the first piece of the device/network-state layer — a netlink
-carrier monitor that aborts connections bound to an interface that loses link.
+control plane, an optional `key=value` startup config file, and the first piece of
+the device/network-state layer — a netlink carrier monitor that aborts connections
+bound to an interface that loses link.
 
 Three design goals from the original architecture are not yet realized: there is
 no event-abstraction layer (libev is a hard dependency), no public Channel API
@@ -186,10 +191,60 @@ Received files are confined to the `received/` directory.
 |---|---|---|
 | `ACE_IP_VERSION` | Select `4` or `6` for the built-in endpoints | `4` |
 | `ACE_UPSTREAM_FILE` | Client control Unix socket path | `/var/run/client` |
+| `ACE_CONFIG_FILE` | Optional `key=value` startup config file (see below) | unset |
 | `ACE_CERT_FILE` | Override TLS certificate path | generated build certificate |
 | `ACE_KEY_FILE` | Override TLS private-key path | generated build key |
+| `ACE_CA_FILE` | Override CA certificate file used to verify the peer | system default |
+| `ACE_CA_PATH` | Override CA certificate directory used to verify the peer | system default |
+| `ACE_HOSTNAME` | Server hostname the client verifies (SNI + certificate) | derived from endpoint `host` |
+| `ACE_TLS_INSECURE` | Set `1` to skip certificate verification (testing only) | unset (verify) |
 | `ACE_BUILD_DIR` | Build directory used by test scripts | `build` |
 | `MIRROR` | Dependency source selection (`github` or `gitee`) | `github` |
+
+## Configuration file
+
+ACE optionally reads a startup configuration file, selected with `ACE_CONFIG_FILE`.
+The format is one `key = value` directive per line; `#` starts a comment and blank
+lines are ignored. It is an optional layer — when no file is named, ACE keeps its
+hardcoded defaults plus environment-variable overrides. When a file is loaded it
+applies last, so the precedence is:
+
+```text
+hardcoded default  <  environment variable  <  config file
+```
+
+Unknown keys, malformed values, and over-long lines are hard errors: startup
+aborts and reports the offending line instead of silently leaving a default in
+place. Boolean values accept `0/1`, `true/false`, `yes/no`, or `on/off`.
+
+```ini
+# client config
+host = 127.0.0.1
+port = 12345
+if_name = ens3
+bindtodevice = true
+file = /var/run/client
+auto_connect = true
+session_path = session
+log_level = warn
+```
+
+The recognized keys are:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `host` | string | Peer host/IP (client target; server bind address) |
+| `port` | u16 | Peer port |
+| `if_name` | string | Interface to bind and monitor (carrier-loss aborts its connections) |
+| `bindtodevice` | bool | Bind the socket to `if_name` (`SO_BINDTODEVICE`) |
+| `cpu` | number | CPU index the service thread is pinned to (`pthread_setaffinity_np`) |
+| `retry` | u32 | Upstream retry count (parsed; not yet wired to retry logic) |
+| `retry_timeout` | u32 | Upstream retry timeout, microseconds (parsed; not yet wired) |
+| `file` | string | Client control Unix socket path |
+| `log_level` | string | Log verbosity |
+| `session_path` | string | TLS session-cache directory |
+| `keylog_path` | string | TLS keylog output path |
+| `auto_connect` | bool | Client auto-connects a warmup probe at startup |
 
 ## Project layout
 
