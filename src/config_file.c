@@ -84,11 +84,11 @@ static int config_file_parse_bool(const char *s, int *out)
 	return -1;
 }
 
-/* Duplicate @s into @dst, freeing any previous strdup'd value.  Frees the
- * OLD value only when it was previously set by us — callers must not pass
- * a pointer that aliases a string literal or an env-var buffer as the old
- * value.  config_file only ever overwrites values it itself set or the
- * NULL defaults, so this is safe here. */
+/* Duplicate @s into @dst.  The OLD value is intentionally NOT freed: it may
+ * be a string literal ("session", "warn") or an env-var pointer, neither of
+ * which is heap-owned.  config is a process-lifetime singleton loaded once at
+ * startup, so overwriting a field more than once is the only leak source and
+ * is negligible. */
 static int config_file_set_str(char **dst, const char *s)
 {
 	char *copy;
@@ -98,7 +98,6 @@ static int config_file_set_str(char **dst, const char *s)
 	copy = strdup(s);
 	if (!copy)
 		return -1;
-	free(*dst);
 	*dst = copy;
 	return 0;
 }
