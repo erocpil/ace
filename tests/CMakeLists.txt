@@ -209,6 +209,20 @@ set_tests_properties(connection_isolation PROPERTIES
 	ENVIRONMENT "ACE_BUILD_DIR=${CMAKE_BINARY_DIR}"
 	LABELS integration)
 
+add_test(
+	NAME config_file_integration
+	COMMAND bash ${PROJECT_SOURCE_DIR}/scripts/config-file-test.sh)
+set_tests_properties(config_file_integration PROPERTIES
+	ENVIRONMENT "ACE_BUILD_DIR=${CMAKE_BINARY_DIR}"
+	LABELS integration)
+
+add_test(
+	NAME link_monitor_integration
+	COMMAND bash ${PROJECT_SOURCE_DIR}/scripts/link-monitor-test.sh)
+set_tests_properties(link_monitor_integration PROPERTIES
+	ENVIRONMENT "ACE_BUILD_DIR=${CMAKE_BINARY_DIR}"
+	LABELS integration)
+
 if(ACE_BUILD_FUZZERS)
 	if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
 		message(FATAL_ERROR "ACE_BUILD_FUZZERS requires Clang")
