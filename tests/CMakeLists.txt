@@ -132,6 +132,14 @@ target_include_directories(test_config_file PRIVATE
 target_compile_options(test_config_file PRIVATE -Wall -Wextra -Werror -Wno-unused-function -UNDEBUG)
 add_test(NAME config_file COMMAND test_config_file)
 
+add_executable(test_link_monitor
+	test_link_monitor.c ${PROJECT_SOURCE_DIR}/src/link_monitor.c)
+target_include_directories(test_link_monitor PRIVATE
+	${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/include/libev)
+target_compile_options(test_link_monitor PRIVATE -Wall -Wextra -Werror -Wno-unused-function -UNDEBUG)
+target_link_libraries(test_link_monitor PRIVATE libev.a pthread m)
+add_test(NAME link_monitor COMMAND test_link_monitor)
+
 add_test(
 	NAME build_deps_version_selection
 	COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/check-build-deps.sh

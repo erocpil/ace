@@ -2,9 +2,11 @@
 #include "task.h"
 #include "task_dispatch.h"
 #include "link.h"
+#include "link_monitor.h"
 #include "runner.h"
 
 static int client_process_upstream_read(struct upstream_echo *echo);
+static void client_link_carrier_cb(const char *ifname, int up, void *user);
 
 /* A service event loop has finished (idle-exit or startup failure).  Runs on
  * the main loop; break it once every service has exited so the client process
@@ -99,6 +101,11 @@ static void client_timeout_cb(EV_P_ ev_timer *w, int revents)
 int client_run(struct client *ct)
 {
 	struct service *pos = NULL;
+	/* Best-effort: carrier monitoring is optional; a NULL monitor (e.g. no
+	 * netlink permission in a container) must not prevent startup. */
+	struct link_monitor *lm = link_monitor_init(ct->loop,
+						    client_link_carrier_cb, NULL);
+
 	list_for_each_entry(pos, &ct->service_head, service_node) {
 		ace_runner_run_service(&ct->n_running_service, pos);
 	}
@@ -111,6 +118,7 @@ int client_run(struct client *ct)
 			&ct->n_running_service) != 0) {
 		result = -1;
 	}
+	link_monitor_stop(lm);
 	return result;
 }
 
@@ -215,6 +223,14 @@ int client_connect_once(struct service *se)
 static inline void client_timer_expired(EV_P_ ev_timer *timer, int revents)
 {
 	client_process_service(EV_A_ timer->data);
+}
+
+/* link_monitor carrier callback: log the transition.  Connection teardown /
+ * path switching on carrier loss is a later phase — this is the seam. */
+static void client_link_carrier_cb(const char *ifname, int up, void *user)
+{
+	(void)user;
+	log("link carrier %s on %s", up ? "UP" : "DOWN", ifname);
 }
 
 static void client_async_w_cb(EV_P_ ev_async *w, int revents)
