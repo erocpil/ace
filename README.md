@@ -32,6 +32,21 @@ The service layer owns a QUIC engine and event loop. Connection and stream
 callbacks translate QUIC events into framed tasks, while the upstream Unix
 socket accepts local control requests such as multi-stream file transfers.
 
+## Implementation status
+
+The implemented surface is the vertical QUIC data path: client/server, TLS
+handshake, session resumption, multi-stream file transfer with crash-safe resume,
+a task framework (sendfile, perf), a layered memory budget, a local AF_UNIX
+control plane, and the first piece of the device/network-state layer — a netlink
+carrier monitor that aborts connections bound to an interface that loses link.
+
+Three design goals from the original architecture are not yet realized: there is
+no event-abstraction layer (libev is a hard dependency), no public Channel API
+(ace is an executable, not a library), and device/network state beyond carrier
+(address, route, DNS) is not modeled. See
+[docs/architecture-conformance.md](docs/architecture-conformance.md) for the
+full implemented-vs-stub map and the remaining work.
+
 ## Supported platforms
 
 - x86_64 Linux: built and tested continuously.
