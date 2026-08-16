@@ -7,6 +7,7 @@
 # scripts had to tolerate killing it in cleanup (or a `timeout 124`).
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source scripts/test-lib.sh
 
 RED='\033[91m'; GREEN='\033[92m'; CYAN='\033[96m'; RESET='\033[m'
 pass() { printf "${GREEN}[PASS]${RESET} %s\n" "$*"; }
@@ -51,7 +52,8 @@ sleep 1
 kill -0 "$CLIENT_PID" 2>/dev/null || fail "client died immediately"
 
 rm -f session/127.0.0.1_12345-
-printf "sf 3 $INPUT\n" | socat - UNIX-CONNECT:"$ACE_UPSTREAM_FILE" 2>/dev/null || true
+ace_send_control "$ACE_UPSTREAM_FILE" "sf 3 $INPUT" \
+    || fail "upstream socket never accepted the sf command"
 
 # Transfer must complete first.
 ok=0

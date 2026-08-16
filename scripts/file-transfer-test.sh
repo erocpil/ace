@@ -4,6 +4,7 @@
 # Non-blocking in CI (continue-on-error).  Tracked separately as known limitation.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source scripts/test-lib.sh
 
 RED='\033[91m'; GREEN='\033[92m'; CYAN='\033[96m'; RESET='\033[m'
 pass() { printf "${GREEN}[PASS]${RESET} %s\n" "$*"; }
@@ -65,9 +66,10 @@ if ! kill -0 $CLIENT_PID 2>/dev/null; then
     fail "File-transfer client died immediately"
 fi
 
-# Send file-transfer command via upstream socket
+# Send file-transfer command via upstream socket (retry until the socket is up)
 rm -f session/127.0.0.1_12345-
-printf 'sf 3 /tmp/ace-ft-input.bin\n' | socat - UNIX-CONNECT:"$ACE_UPSTREAM_FILE" 2>/dev/null || true
+ace_send_control "$ACE_UPSTREAM_FILE" "sf 3 /tmp/ace-ft-input.bin" \
+    || fail "upstream socket never accepted the sf command"
 
 # Wait for transfer to complete
 for _attempt in $(seq 1 40); do

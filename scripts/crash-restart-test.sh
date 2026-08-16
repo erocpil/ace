@@ -6,6 +6,7 @@
 # starting over from scratch.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source scripts/test-lib.sh
 
 RED='\033[91m'; GREEN='\033[92m'; CYAN='\033[96m'; RESET='\033[m'
 pass() { printf "${GREEN}[PASS]${RESET} %s\n" "$*"; }
@@ -66,7 +67,8 @@ info "Phase 1: start transfer, kill receiver after first segment completes"
 start_server
 start_client
 rm -f session/127.0.0.1_12345-
-printf "sf $NSEG $INPUT\n" | socat - UNIX-CONNECT:"$ACE_UPSTREAM_FILE" 2>/dev/null || true
+ace_send_control "$ACE_UPSTREAM_FILE" "sf $NSEG $INPUT" \
+    || fail "upstream socket never accepted the sf command (phase 1)"
 
 # Wait for segment 0's done flag to flip to 1 in the sidecar (the .acemeta is
 # created at init with all-done=0; a segment's done byte is set + fsync'd only
@@ -99,7 +101,8 @@ info "Phase 2: restart server+client, expect resume"
 start_server
 start_client
 rm -f session/127.0.0.1_12345-
-printf "sf $NSEG $INPUT\n" | socat - UNIX-CONNECT:"$ACE_UPSTREAM_FILE" 2>/dev/null || true
+ace_send_control "$ACE_UPSTREAM_FILE" "sf $NSEG $INPUT" \
+    || fail "upstream socket never accepted the sf command (phase 2)"
 
 for _ in $(seq 1 200); do
     if [ -f "received/$NAME" ] && cmp -s "$INPUT" "received/$NAME"; then

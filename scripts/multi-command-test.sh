@@ -4,6 +4,7 @@
 # overwrites lconn_ctx->task / stream-0 negotiation (one task per connection).
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source scripts/test-lib.sh
 
 RED='\033[91m'; GREEN='\033[92m'; CYAN='\033[96m'; RESET='\033[m'
 pass() { printf "${GREEN}[PASS]${RESET} %s\n" "$*"; }
@@ -49,6 +50,8 @@ sleep 1
 kill -0 "$CLIENT_PID" 2>/dev/null || fail "client died immediately"
 
 rm -f session/127.0.0.1_12345-
+# Wait for the upstream socket to be listening before the hold-open send.
+ace_wait_connect "$ACE_UPSTREAM_FILE" || fail "upstream socket never ready"
 # Two commands piped at once; hold the socket open so both are drained.
 ( printf 'sf 3 /tmp/ace-mc-a.bin\nsf 3 /tmp/ace-mc-b.bin\n'; sleep 20 ) | \
     socat - UNIX-CONNECT:"$ACE_UPSTREAM_FILE" >/dev/null 2>&1 &

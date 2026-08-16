@@ -5,6 +5,7 @@
 # sides exit the task.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source scripts/test-lib.sh
 
 RED='\033[91m'; GREEN='\033[92m'; CYAN='\033[96m'; RESET='\033[m'
 pass() { printf "${GREEN}[PASS]${RESET} %s\n" "$*"; }
@@ -47,7 +48,8 @@ kill -0 "$CLIENT_PID" 2>/dev/null || fail "perf client died immediately"
 
 rm -f session/127.0.0.1_12345-
 info "Sending perf $NSEG ..."
-printf "perf $NSEG\n" | socat - UNIX-CONNECT:"$ACE_UPSTREAM_FILE" 2>/dev/null || true
+ace_send_control "$ACE_UPSTREAM_FILE" "perf $NSEG" \
+    || fail "upstream socket never accepted the perf command"
 
 for _ in $(seq 1 40); do
     if grep -q 'task exiting' /tmp/ace-perf-client.log 2>/dev/null &&
