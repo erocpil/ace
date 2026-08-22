@@ -133,6 +133,10 @@ echoes a checksummed 4096-byte probe, transfers a 98,304-byte random file over
 three streams, compares the persisted file byte-for-byte, and verifies clean
 thread shutdown.
 
+For manual testing with isolated client/server network namespaces, symmetric
+10 Mbps shaping, and 5% loss in each direction, see the
+[weak-network emulation guide](docs/weak-network-emulation.md).
+
 ```bash
 ACE_BUILD_DIR=build/debug bash scripts/smoke-test.sh
 ACE_BUILD_DIR=build/debug ACE_IP_VERSION=6 bash scripts/smoke-test.sh
